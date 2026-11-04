@@ -1,0 +1,11 @@
+node_modules
+dist
+.DS_Store
+*.local
+training/.venv
+training/data/*
+!training/data/README.md
+training/out/*
+!training/out/.gitkeep
+__pycache__
+public/vendor
