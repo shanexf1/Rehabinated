@@ -1,0 +1,12 @@
+{
+  "name": "Rehabinated",
+  "short_name": "Rehabinated",
+  "description": "Home rehab coach with camera tracking, rep counting and daily streaks.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f3f6f6",
+  "theme_color": "#0b5d57",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

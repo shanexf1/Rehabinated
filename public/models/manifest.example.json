@@ -1,0 +1,18 @@
+{
+  "format": "rehabinated-model@1",
+  "name": "rep-quality-gbm",
+  "version": "1",
+  "exercises": ["sit-to-stand", "mini-squat", "shoulder-abduction"],
+  "inputs": [
+    "range_frac", "peak_shortfall_deg", "path_error", "duration_s", "duration_ratio",
+    "to_target_ratio", "hold_s", "return_ratio", "jerk_index", "side_diff_deg",
+    "posture_excess_deg", "confidence", "range_vs_first",
+    "exercise:sit-to-stand", "exercise:mini-squat", "exercise:shoulder-abduction"
+  ],
+  "score": { "file": "score.onnx", "output": "variable", "outputRange": [0, 100] },
+  "mistake": {
+    "file": "mistake.onnx",
+    "probabilitiesOutput": "probabilities",
+    "classes": ["good", "too_shallow", "too_fast", "dropped", "jerky", "posture", "uneven"]
+  }
+}
