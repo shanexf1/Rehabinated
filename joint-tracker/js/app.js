@@ -4,13 +4,16 @@ import { FilesetResolver, PoseLandmarker } from
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs";
 import { analyzeFrames, poseToFrame, sideVisibility, kneeFlexionDeg, median, DEFAULTS }
   from "./kneeAngles.js";
+import { TESTS, CHAIR, frameFeatures, classifyTest, pickLeg, rotationForHead, unrotateLandmarks,
+  drawRotated, countChairStands } from "./movement.js";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm";
 const MODEL_URLS = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
 };
-const APP_VERSION = "0.1.0";
+const APP_VERSION = "0.2.0";
+const ROTATION_CYCLE = [90, -90, 0];
 
 const $ = (id) => document.getElementById(id);
 const video = $("video"), canvas = $("overlay"), ctx = canvas.getContext("2d");
@@ -19,16 +22,27 @@ const ui = {
   btnCamera: $("btnCamera"), btnRecord: $("btnRecord"), file: $("fileInput"),
   rec: $("recBadge"), recCount: $("recCount"), progress: $("progress"), bar: $("progressBar"),
   side: $("side"), facing: $("facing"), model: $("model"), rate: $("rate"),
+  movement: $("movement"), moveChip: $("moveChip"), moveTip: $("moveTip"), best: $("best"),
+  resMovement: $("resMovement"), countdown: $("countdown"),
 };
 
 const state = {
   landmarker: null, modelKind: null, delegate: null, modelSource: null,
   lastTs: 0, stream: null, looping: false, lastVideoTime: -1, wakeLock: null,
   recording: false, recStart: 0, lastRecT: -Infinity,
-  rec: null, // { left: [], right: [], noPose: 0, width, height, mode }
+  rec: null, // { left: [], right: [], feats: [], noPose: 0, width, height, mode, rotations: {} }
   liveThigh: [], liveShank: [],
+  featBuf: [], lastClassifyT: 0, auto: { id: null, confidence: 0, reason: "" }, pendingAuto: null,
+  rotation: 0, noPoseStreak: 0, rotCanvas: null, liveGood: [], countingDown: false,
   session: null, analysis: null,
 };
+
+window.__tracker = state; // debugging / browser tests (no personal data)
+
+// The movement in force: the user's choice, else the auto-detected one (may be null).
+function currentMovement() {
+  return ui.movement.value !== "auto" ? ui.movement.value : state.auto.id;
+}
 
 // ---------- model ----------
 let filesetPromise = null;
@@ -81,6 +95,9 @@ async function startCamera() {
     console.error(e); return;
   }
   video.removeAttribute("src");
+  state.featBuf = []; state.liveGood = []; state.rotationSet = false; state.rotation = 0;
+  state.auto = { id: null, confidence: 0, reason: "" }; state.pendingAuto = null;
+  renderMovementChip();
   video.srcObject = state.stream;
   await video.play();
   sizeCanvas();
@@ -116,15 +133,72 @@ function loop() {
     state.lastVideoTime = video.currentTime;
     if (canvas.width !== video.videoWidth && video.videoWidth) sizeCanvas();
     const now = performance.now();
-    const res = state.landmarker.detectForVideo(video, nextTs(now));
-    handlePose(res.landmarks?.[0], (now - state.recStart) / 1000, true);
+    handlePose(detect(nextTs(now)), (now - state.recStart) / 1000, true);
   }
   requestAnimationFrame(loop);
+}
+
+// Run the pose model on the current video frame. For lying movements the frame is
+// rotated 90° so the person appears upright to the model; landmarks are mapped back.
+function detect(ts) {
+  const W = video.videoWidth, H = video.videoHeight;
+  const lying = TESTS[currentMovement()]?.lying;
+  if (!lying) state.rotation = 0;
+  let source = video;
+  if (state.rotation) {
+    state.rotCanvas ??= document.createElement("canvas");
+    const rc = state.rotCanvas;
+    if (rc.width !== H || rc.height !== W) { rc.width = H; rc.height = W; }
+    drawRotated(rc.getContext("2d"), video, W, H, state.rotation);
+    source = rc;
+  }
+  const lm = state.landmarker.detectForVideo(source, ts).landmarks?.[0];
+  if (lm) {
+    state.noPoseStreak = 0;
+    if (state.rec) state.rec.rotations[state.rotation] = (state.rec.rotations[state.rotation] || 0) + 1;
+    return unrotateLandmarks(lm, state.rotation);
+  }
+  // Lying and nothing found for a while: try the next orientation.
+  if (lying && ++state.noPoseStreak >= 15) {
+    state.noPoseStreak = 0;
+    state.rotation = ROTATION_CYCLE[(ROTATION_CYCLE.indexOf(state.rotation) + 1) % ROTATION_CYCLE.length];
+  }
+  return undefined;
+}
+
+// ---------- movement ----------
+let classifyTick = 0;
+function updateAuto(force = false) {
+  if (!force && ++classifyTick % 10 !== 0) return;
+  const c = classifyTest(state.featBuf.slice(-120));
+  if (c.id && c.id !== state.auto.id) {
+    // Switch only when two checks in a row agree, so the label doesn't flicker.
+    if (state.pendingAuto === c.id || !state.auto.id) { state.auto = c; state.pendingAuto = null; }
+    else state.pendingAuto = c.id;
+  } else if (c.id) { state.auto = c; state.pendingAuto = null; }
+  renderMovementChip();
+}
+
+function renderMovementChip() {
+  const manual = ui.movement.value !== "auto";
+  const mv = currentMovement();
+  let text;
+  if (manual) {
+    text = `${TESTS[mv].label} · set by you`;
+    if (state.auto.id && state.auto.id !== mv) text += ` (auto-detect says ${TESTS[state.auto.id].label})`;
+  } else if (state.auto.id) {
+    text = `${TESTS[state.auto.id].label} · auto ${Math.round(state.auto.confidence * 100)}%`;
+  } else text = state.auto.reason ? `Detecting test… (${state.auto.reason})` : "Detecting test…";
+  ui.moveChip.textContent = text;
+  ui.moveChip.title = state.auto.reason || "";
+  ui.moveTip.textContent = TESTS[mv]?.setup ??
+    "Film from the side with the whole body in view. The app recognises the test (lying, seated or chair stand), or pick it here.";
 }
 
 // ---------- per-frame handling ----------
 function chooseSide(lm) {
   if (ui.side.value !== "auto") return ui.side.value;
+  if (state.featBuf.length >= 8) return pickLeg(state.featBuf.slice(-90), currentMovement() ?? "seated_knee_rom").side;
   return sideVisibility(lm, "right") >= sideVisibility(lm, "left") ? "right" : "left";
 }
 
@@ -133,11 +207,23 @@ function handlePose(lm, tSec, live) {
   ctx.clearRect(0, 0, W, H);
   if (!lm) {
     ui.angle.textContent = "--";
-    setHint("No person detected. Fit the whole leg in the frame.", true);
+    setHint(TESTS[currentMovement()]?.lying
+      ? "No person detected. Lying down: phone on the floor in landscape, whole body in frame."
+      : "No person detected. Fit the whole body in the frame.", true);
     if (state.recording || !live) state.rec.noPose++;
     return;
   }
+  const feats = frameFeatures(lm, W, H);
+  pushWindow(state.featBuf, feats, 180);
+  updateAuto();
+  const mv = currentMovement();
+  if (TESTS[mv]?.lying && !state.rotationSet) {
+    state.rotation = rotationForHead(feats.headLeft);
+    state.rotationSet = true;
+  } else if (!TESTS[mv]?.lying) state.rotationSet = false;
+
   const side = chooseSide(lm);
+  if (side !== state.liveSide) { state.liveSide = side; state.liveThigh = []; state.liveShank = []; }
   const f = poseToFrame(lm, side, W, H, tSec);
   const flex = kneeFlexionDeg(f.hip, f.knee, f.ankle);
   const minVis = Math.min(f.hip[2], f.knee[2], f.ankle[2]);
@@ -156,17 +242,46 @@ function handlePose(lm, tSec, live) {
   ui.angle.textContent = Number.isFinite(flex) ? `${Math.round(flex)}°` : "--";
   if (minVis < DEFAULTS.visibilityMin) setHint("Hip, knee and ankle must all be clearly visible.", true);
   else if (segOff) setHint("Leg looks rotated: turn side-on to the camera.", true);
-  else setHint(`Tracking ${side} leg${state.recording ? " · recording" : ""}`, false);
+  else setHint(`Tracking ${side} leg · ${TESTS[mv]?.label ?? "detecting test"}` +
+               `${state.recording ? " · recording" : ""}`, false);
+
+  // Live result (trusted frames only): whole recording, or the last 10 s.
+  if (ok && Number.isFinite(flex)) state.liveGood.push({ t: tSec, flex });
+  if (!state.recording) state.liveGood = state.liveGood.filter((g) => g.t > tSec - 10);
+  ui.best.textContent = liveSummary(mv, tSec);
 
   const record = live ? state.recording : true;
   if (!record) return;
   const rate = clampRate();
   if (live && tSec - state.lastRecT < 1 / rate) return;
   state.lastRecT = tSec;
-  // Store both legs so "Auto" can pick the side facing the camera over the whole session.
+  // Store both legs and body features so the leg and movement can be (re)chosen later.
   state.rec.left.push(poseToFrame(lm, "left", W, H, tSec));
   state.rec.right.push(poseToFrame(lm, "right", W, H, tSec));
+  state.rec.feats.push(feats);
   ui.recCount.textContent = String(state.rec.right.length);
+}
+
+function liveSummary(mv, tSec) {
+  const vals = state.liveGood.map((g) => g.flex);
+  if (!vals.length) return "";
+  if (TESTS[mv]?.kind === "chair_stand") {
+    if (!state.recording) return "Sit down, press Record, and stand up on Go. The app stops after 30 s.";
+    const r = countChairStands(state.liveGood, { startT: state.rec?.chairStartT ?? null });
+    if (r.t0 == null) return "Timing starts when you first stand up…";
+    const left = Math.max(0, CHAIR.windowS - (tSec - r.t0));
+    if (tSec - r.t0 >= CHAIR.windowS + 0.5) requestAutoStop();   // keep 0.5 s past the window
+    return `Stands: ${r.reps} · ${Math.ceil(left)} s left`;
+  }
+  const when = state.recording ? "this recording" : "last 10 s";
+  return `Best straightening ${Math.round(Math.min(...vals))}° · deepest bend ${Math.round(Math.max(...vals))}° (${when})`;
+}
+
+// Stop a live chair stand once, right after the 30 s window ends.
+function requestAutoStop() {
+  if (state.autoStopping || !state.recording || state.rec?.mode !== "camera") return;
+  state.autoStopping = true;
+  setTimeout(() => { state.autoStopping = false; if (state.recording) toggleRecord(); }, 0);
 }
 
 function pushWindow(arr, v, n = 45) { arr.push(v); if (arr.length > n) arr.shift(); }
@@ -192,17 +307,15 @@ function clampRate() { return Math.min(30, Math.max(2, Number(ui.rate.value) || 
 
 // ---------- recording ----------
 function newRec(mode) {
-  return { left: [], right: [], noPose: 0, width: canvas.width, height: canvas.height, mode };
+  return { left: [], right: [], feats: [], noPose: 0, width: canvas.width, height: canvas.height, mode, rotations: {} };
 }
 
 function toggleRecord() {
+  if (state.countingDown) return;
   if (!state.recording) {
-    state.rec = newRec("camera");
-    state.recStart = performance.now(); state.lastRecT = -Infinity;
-    state.recording = true;
-    ui.btnRecord.textContent = "Stop & review"; ui.btnRecord.classList.add("recording");
-    ui.rec.hidden = false; ui.recCount.textContent = "0";
-    $("results").hidden = true;
+    // The chair stand is timed: count down, start at "Go", stop after 30 s.
+    if (currentMovement() === "chair_stand_30s") return countdownThenRecord();
+    startRecording(null);
   } else {
     state.recording = false;
     ui.btnRecord.textContent = "Record"; ui.btnRecord.classList.remove("recording");
@@ -210,6 +323,33 @@ function toggleRecord() {
     finalize();
   }
 }
+
+function startRecording(chairStartT) {
+  state.rec = newRec("camera");
+  state.rec.chairStartT = chairStartT;
+  state.recStart = performance.now(); state.lastRecT = -Infinity; state.liveGood = [];
+  state.lastFileName = null;
+  state.recording = true;
+  ui.btnRecord.textContent = "Stop & review"; ui.btnRecord.classList.add("recording");
+  ui.rec.hidden = false; ui.recCount.textContent = "0";
+  $("results").hidden = true;
+}
+
+async function countdownThenRecord() {
+  state.countingDown = true;
+  ui.btnRecord.disabled = true;
+  $("results").hidden = true;
+  ui.countdown.hidden = false;
+  for (const n of ["3", "2", "1"]) { ui.countdown.textContent = n; await sleep(1000); }
+  ui.countdown.textContent = "Go";
+  startRecording(0);
+  state.countingDown = false;
+  ui.btnRecord.disabled = false;
+  await sleep(700);
+  ui.countdown.hidden = true;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function analyzeFile(file) {
   if (!file || !state.landmarker) return;
@@ -221,7 +361,8 @@ async function analyzeFile(file) {
   await video.play().catch(() => {}); video.pause();
   sizeCanvas();
   state.rec = newRec("video_file");
-  state.liveThigh = []; state.liveShank = [];
+  state.liveThigh = []; state.liveShank = []; state.featBuf = []; state.liveGood = [];
+  state.auto = { id: null, confidence: 0, reason: "" }; state.rotationSet = false;
   const step = 1 / clampRate(), dur = video.duration;
   if (!Number.isFinite(dur) || dur <= 0) { setHint("Could not read this video's length.", true); return; }
   ui.progress.hidden = false; ui.btnCamera.disabled = true;
@@ -229,10 +370,10 @@ async function analyzeFile(file) {
   for (let t = 0; t < dur; t += step) {
     video.currentTime = t;
     await once(video, "seeked");
-    const res = state.landmarker.detectForVideo(video, nextTs(base + t * 1000));
-    handlePose(res.landmarks?.[0], t, false);
+    handlePose(detect(nextTs(base + t * 1000)), t, false);
     ui.bar.style.width = `${Math.min(100, (100 * t) / dur)}%`;
   }
+  state.lastFileName = file.name;
   ui.progress.hidden = true; ui.btnCamera.disabled = false;
   finalize(file.name);
 }
@@ -240,20 +381,36 @@ async function analyzeFile(file) {
 function once(el, ev) { return new Promise((r) => el.addEventListener(ev, r, { once: true })); }
 
 // ---------- results ----------
-function finalize(fileName) {
+// Build the session from the recording. `override` = movement chosen on the results screen.
+function finalize(fileName, override = null, scroll = true) {
   const rec = state.rec;
   if (!rec || rec.right.length < 3) {
     setHint("Too few frames with a detected person. Record at least a few seconds.", true);
     return;
   }
-  const meanVis = (frames) => frames.reduce((s, f) => s + Math.min(f.hip[2], f.knee[2], f.ankle[2]), 0) / frames.length;
-  const side = ui.side.value !== "auto" ? ui.side.value
-    : (meanVis(rec.right) >= meanVis(rec.left) ? "right" : "left");
+  const autoRes = classifyTest(rec.feats);
+  let movement, chosenBy;
+  if (override) { movement = override; chosenBy = "user"; }
+  else if (ui.movement.value !== "auto") { movement = ui.movement.value; chosenBy = "user"; }
+  else if (autoRes.id) { movement = autoRes.id; chosenBy = "auto"; }
+  else { movement = "unknown"; chosenBy = "none"; }
+  const legPick = ui.side.value !== "auto"
+    ? { side: ui.side.value, reason: "set by you" }
+    : pickLeg(rec.feats, TESTS[movement] ? movement : "seated_knee_rom");
+  const side = legPick.side;
   const frames = rec[side];
   const analysis = analyzeFrames(frames);
+  const rotUsed = Object.entries(rec.rotations).sort((a, b) => b[1] - a[1])[0]?.[0];
+  const evaluation = evaluate(movement, analysis, rec);
   state.analysis = analysis;
+  state.evaluation = evaluation;
   state.session = {
-    patient_id: null, exercise: "seated_knee_extension", side,
+    patient_id: null,
+    exercise: TESTS[movement] ? movement : "unknown",
+    evaluation,
+    exercise_detection: { auto_id: autoRes.id, auto_confidence: +autoRes.confidence.toFixed(2),
+                          auto_reason: autoRes.reason, chosen_by: chosenBy },
+    side, side_reason: legPick.reason,
     camera_view: null, coordinate_units: "pixels",
     image_width_px: rec.width, image_height_px: rec.height, frames,
     source: {
@@ -261,18 +418,69 @@ function finalize(fileName) {
       pose_model: `mediapipe pose_landmarker_${state.modelKind}`, delegate: state.delegate,
       capture: rec.mode, file_name: fileName ?? null,
       sample_rate_hz: clampRate(), frames_without_pose: rec.noPose,
+      detection_rotation_deg: rotUsed != null ? Number(rotUsed) : 0,
       recorded_at: new Date().toISOString(),
     },
   };
-  renderResults(analysis, side, rec.noPose);
+  renderResults(analysis, side, rec.noPose, movement, chosenBy, autoRes);
   prefillPrevious();
   $("results").hidden = false;
-  $("results").scrollIntoView({ behavior: "smooth" });
+  if (scroll) $("results").scrollIntoView({ behavior: "smooth" });
 }
 
 const deg = (v) => (Number.isFinite(v) ? `${v.toFixed(1)}°` : "--");
+const r1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
 
-function renderResults(a, side, noPose) {
+// Test-specific result, computed from trusted frames only.
+function evaluate(test, a, rec) {
+  if (TESTS[test]?.kind === "chair_stand") {
+    const series = a.rows.filter((r) => r.status === "valid").map((r) => ({ t: r.t_s, flex: r.flexion_deg }));
+    const c = countChairStands(series, { startT: rec.chairStartT ?? null });
+    return {
+      type: "chair_stand_30s", stands_30s: c.reps,
+      start_s: r1(c.t0), end_s: r1(c.tEnd), covers_full_30s: !!c.coversWindow,
+      halfway_stand_counted: c.halfwayCounted,
+      stands: c.stands.map((st) => ({ t_s: r1(st.t), knee_at_stand_deg: r1(st.minFlex), fully_straight: st.fullyStraight })),
+      thresholds_deg: { sitting: CHAIR.sitDeg, standing: CHAIR.standDeg, fully_straight: CHAIR.fullStandDeg },
+      timing: rec.chairStartT != null ? "from countdown Go" : "from first rise", note: c.note,
+    };
+  }
+  if (TESTS[test]?.kind === "rom") {
+    return { type: test, best_extension_deg: r1(a.summary?.extension_lag_deg),
+             max_flexion_deg: r1(a.summary?.peak_flexion_deg), rom_deg: r1(a.summary?.rom_deg) };
+  }
+  return { type: "unknown" };
+}
+
+function renderEval(e) {
+  const box = $("evalBox");
+  if (e.type === "chair_stand_30s") {
+    const bent = e.stands.filter((s) => !s.fully_straight).length;
+    box.innerHTML = `<span class="big">${e.stands_30s}</span> stands in 30 s` +
+      `<span class="sub2">${e.halfway_stand_counted ? "Includes one stand more than halfway up at 30 s. " : ""}` +
+      `${bent ? `${bent} stand${bent > 1 ? "s" : ""} without a fully straight knee (&gt; ${e.thresholds_deg.fully_straight}°). ` : "Knee straight at every stand. "}` +
+      `Timed ${e.timing}. ${e.note}</span>`;
+  } else if (e.type === "unknown") {
+    box.innerHTML = `<span class="sub2">Pick the test above to see its result.</span>`;
+  } else {
+    box.innerHTML = `Best straightening <span class="big">${e.best_extension_deg ?? "--"}°</span>` +
+      ` · deepest bend <span class="big">${e.max_flexion_deg ?? "--"}°</span>` +
+      `<span class="sub2">0° = fully straight. Straightening is how far the knee stays short of straight.</span>`;
+  }
+}
+
+function renderResults(a, side, noPose, movement, chosenBy, autoRes) {
+  ui.resMovement.value = TESTS[movement] ? movement : "unknown";
+  const how = { user: "set by you", auto: `auto-detected (${Math.round(autoRes.confidence * 100)}%)`,
+                none: "not recognised: pick the test" }[chosenBy];
+  $("resHow").textContent = how + (chosenBy === "user" && autoRes.id && autoRes.id !== movement
+    ? `; auto-detect says ${TESTS[autoRes.id].label}` : "");
+  $("resHow").classList.toggle("warn", chosenBy === "none");
+  const rom = TESTS[movement]?.kind === "rom";
+  $("sLag").parentElement.classList.toggle("primary", rom);
+  $("sPeak").parentElement.classList.toggle("primary", rom);
+  $("sRom").parentElement.classList.toggle("primary", false);
+  renderEval(state.evaluation);
   $("sLag").textContent = deg(a.summary?.extension_lag_deg);
   $("sPeak").textContent = deg(a.summary?.peak_flexion_deg);
   $("sRom").textContent = deg(a.summary?.rom_deg);
@@ -280,7 +488,7 @@ function renderResults(a, side, noPose) {
   const rejected = a.rows.filter((r) => r.status === "rejected");
   const reasons = {};
   for (const r of rejected) { const k = r.reason.split(" (")[0]; reasons[k] = (reasons[k] || 0) + 1; }
-  const parts = [`${side[0].toUpperCase()}${side.slice(1)} leg.`];
+  const parts = [`${side[0].toUpperCase()}${side.slice(1)} leg (${state.session.side_reason}).`];
   if (rejected.length) parts.push(`Rejected: ${Object.entries(reasons).map(([k, n]) => `${n} × ${k}`).join(", ")}.`);
   if (noPose) parts.push(`${noPose} frames had no person detected.`);
   if (!a.enoughFrames) parts.push("Not enough reliable frames for a decision: re-record side-on, whole leg visible.");
@@ -402,25 +610,35 @@ function download(file = sessionFile()) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
-// Remember this session's summary per patient ID on this phone, to prefill "last session".
+// Remember each session's summary per patient ID and movement on this phone,
+// to prefill "last session" next time.
+const historyKey = (pid, exercise) => `${pid}|${exercise}`;
+
 function remember(s) {
   if (!state.analysis?.summary) return;
   try {
-    const all = JSON.parse(localStorage.getItem("kneeHistory") || "{}");
-    all[s.patient_id] = { extension_lag_deg: +state.analysis.summary.extension_lag_deg.toFixed(1),
+    const all = JSON.parse(localStorage.getItem("kneeHistory2") || "{}");
+    all[historyKey(s.patient_id, s.exercise)] = {
+      extension_lag_deg: +state.analysis.summary.extension_lag_deg.toFixed(1),
+      peak_flexion_deg: +state.analysis.summary.peak_flexion_deg.toFixed(1),
       rom_deg: +state.analysis.summary.rom_deg.toFixed(1), pain_0_10: s.pain_0_10 ?? null,
       saved_at: new Date().toISOString() };
-    localStorage.setItem("kneeHistory", JSON.stringify(all));
+    localStorage.setItem("kneeHistory2", JSON.stringify(all));
   } catch { /* storage unavailable: skip */ }
 }
 
 function prefillPrevious() {
+  const fields = { pLag: "extension_lag_deg", pRom: "rom_deg", pPain: "pain_0_10" };
+  // Clear values this function filled earlier (e.g. for another movement), keep typed ones.
+  for (const [id, v] of Object.entries(state.prefilled ?? {})) if ($(id).value === String(v)) $(id).value = "";
+  state.prefilled = {};
   try {
-    const last = JSON.parse(localStorage.getItem("kneeHistory") || "{}")[$("pid").value.trim()];
+    const all = JSON.parse(localStorage.getItem("kneeHistory2") || "{}");
+    const last = all[historyKey($("pid").value.trim(), state.session.exercise)];
     if (!last) return;
-    if (!$("pLag").value) $("pLag").value = last.extension_lag_deg;
-    if (!$("pRom").value) $("pRom").value = last.rom_deg;
-    if (!$("pPain").value && last.pain_0_10 != null) $("pPain").value = last.pain_0_10;
+    for (const [id, key] of Object.entries(fields)) {
+      if (!$(id).value && last[key] != null) { $(id).value = last[key]; state.prefilled[id] = last[key]; }
+    }
   } catch { /* storage unavailable: skip */ }
 }
 
@@ -429,6 +647,8 @@ ui.btnCamera.onclick = () => startCamera();
 ui.btnRecord.onclick = () => toggleRecord();
 ui.file.onchange = (e) => analyzeFile(e.target.files[0]).finally(() => { e.target.value = ""; });
 ui.model.onchange = () => loadModel(ui.model.value);
+ui.movement.onchange = () => { state.rotationSet = false; state.rotation = 0; state.liveGood = []; renderMovementChip(); };
+ui.resMovement.onchange = () => finalize(state.lastFileName, ui.resMovement.value, false);
 ui.facing.onchange = () => { if (state.stream) { stopCamera(); startCamera(); } };
 $("btnShare").onclick = () => share();
 $("btnDownload").onclick = () => state.session && download();
@@ -442,4 +662,5 @@ document.addEventListener("visibilitychange", async () => {
 if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
   ui.hint.textContent = "Camera needs HTTPS. Open the GitHub Pages link, not a local file.";
 }
+renderMovementChip();
 loadModel("lite");
