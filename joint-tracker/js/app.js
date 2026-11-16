@@ -4,7 +4,7 @@ import { FilesetResolver, PoseLandmarker } from
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs";
 import { analyzeFrames, poseToFrame, sideVisibility, kneeFlexionDeg, median, DEFAULTS }
   from "./kneeAngles.js";
-import { TESTS, CHAIR, frameFeatures, classifyTest, pickLeg, rotationForHead, unrotateLandmarks,
+import { TESTS, CHAIR, frameFeatures, pickLeg, rotationForHead, unrotateLandmarks,
   drawRotated, countChairStands } from "./movement.js";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm";
@@ -12,7 +12,7 @@ const MODEL_URLS = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
 };
-const APP_VERSION = "0.2.0";
+const APP_VERSION = "0.3.0";
 const ROTATION_CYCLE = [90, -90, 0];
 
 const $ = (id) => document.getElementById(id);
@@ -22,7 +22,7 @@ const ui = {
   btnCamera: $("btnCamera"), btnRecord: $("btnRecord"), file: $("fileInput"),
   rec: $("recBadge"), recCount: $("recCount"), progress: $("progress"), bar: $("progressBar"),
   side: $("side"), facing: $("facing"), model: $("model"), rate: $("rate"),
-  movement: $("movement"), moveChip: $("moveChip"), moveTip: $("moveTip"), best: $("best"),
+  movement: $("movement"), moveTip: $("moveTip"), best: $("best"),
   resMovement: $("resMovement"), countdown: $("countdown"),
 };
 
@@ -32,7 +32,7 @@ const state = {
   recording: false, recStart: 0, lastRecT: -Infinity,
   rec: null, // { left: [], right: [], feats: [], noPose: 0, width, height, mode, rotations: {} }
   liveThigh: [], liveShank: [],
-  featBuf: [], lastClassifyT: 0, auto: { id: null, confidence: 0, reason: "" }, pendingAuto: null,
+  featBuf: [], sideVotes: 0,
   rotation: 0, noPoseStreak: 0, rotCanvas: null, liveGood: [], countingDown: false,
   session: null, analysis: null,
 };
@@ -41,7 +41,7 @@ window.__tracker = state; // debugging / browser tests (no personal data)
 
 // The movement in force: the user's choice, else the auto-detected one (may be null).
 function currentMovement() {
-  return ui.movement.value !== "auto" ? ui.movement.value : state.auto.id;
+  return ui.movement.value;
 }
 
 // ---------- model ----------
@@ -96,8 +96,8 @@ async function startCamera() {
   }
   video.removeAttribute("src");
   state.featBuf = []; state.liveGood = []; state.rotationSet = false; state.rotation = 0;
-  state.auto = { id: null, confidence: 0, reason: "" }; state.pendingAuto = null;
-  renderMovementChip();
+  state.liveSide = null; state.sideVotes = 0;
+  renderTest();
   video.srcObject = state.stream;
   await video.play();
   sizeCanvas();
@@ -166,40 +166,25 @@ function detect(ts) {
   return undefined;
 }
 
-// ---------- movement ----------
-let classifyTick = 0;
-function updateAuto(force = false) {
-  if (!force && ++classifyTick % 10 !== 0) return;
-  const c = classifyTest(state.featBuf.slice(-120));
-  if (c.id && c.id !== state.auto.id) {
-    // Switch only when two checks in a row agree, so the label doesn't flicker.
-    if (state.pendingAuto === c.id || !state.auto.id) { state.auto = c; state.pendingAuto = null; }
-    else state.pendingAuto = c.id;
-  } else if (c.id) { state.auto = c; state.pendingAuto = null; }
-  renderMovementChip();
-}
-
-function renderMovementChip() {
-  const manual = ui.movement.value !== "auto";
-  const mv = currentMovement();
-  let text;
-  if (manual) {
-    text = `${TESTS[mv].label} · set by you`;
-    if (state.auto.id && state.auto.id !== mv) text += ` (auto-detect says ${TESTS[state.auto.id].label})`;
-  } else if (state.auto.id) {
-    text = `${TESTS[state.auto.id].label} · auto ${Math.round(state.auto.confidence * 100)}%`;
-  } else text = state.auto.reason ? `Detecting test… (${state.auto.reason})` : "Detecting test…";
-  ui.moveChip.textContent = text;
-  ui.moveChip.title = state.auto.reason || "";
-  ui.moveTip.textContent = TESTS[mv]?.setup ??
-    "Film from the side with the whole body in view. The app recognises the test (lying, seated or chair stand), or pick it here.";
+// ---------- test choice ----------
+const TEST_KEY = "kneeTest";
+function renderTest() {
+  const t = TESTS[currentMovement()];
+  ui.moveTip.textContent = t.setup;
+  try { localStorage.setItem(TEST_KEY, currentMovement()); } catch { /* optional */ }
 }
 
 // ---------- per-frame handling ----------
+// Live leg: sticky, so the display doesn't jump between legs. Switch only after the
+// other leg has looked better for ~1 s of frames in a row.
 function chooseSide(lm) {
   if (ui.side.value !== "auto") return ui.side.value;
-  if (state.featBuf.length >= 8) return pickLeg(state.featBuf.slice(-90), currentMovement() ?? "seated_knee_rom").side;
-  return sideVisibility(lm, "right") >= sideVisibility(lm, "left") ? "right" : "left";
+  const guess = state.featBuf.length >= 8
+    ? pickLeg(state.featBuf.slice(-90), currentMovement()).side
+    : (sideVisibility(lm, "right") >= sideVisibility(lm, "left") ? "right" : "left");
+  if (!state.liveSide) return guess;
+  if (guess === state.liveSide) { state.sideVotes = 0; return state.liveSide; }
+  return ++state.sideVotes >= 30 ? (state.sideVotes = 0, guess) : state.liveSide;
 }
 
 function handlePose(lm, tSec, live) {
@@ -215,7 +200,6 @@ function handlePose(lm, tSec, live) {
   }
   const feats = frameFeatures(lm, W, H);
   pushWindow(state.featBuf, feats, 180);
-  updateAuto();
   const mv = currentMovement();
   if (TESTS[mv]?.lying && !state.rotationSet) {
     state.rotation = rotationForHead(feats.headLeft);
@@ -242,7 +226,7 @@ function handlePose(lm, tSec, live) {
   ui.angle.textContent = Number.isFinite(flex) ? `${Math.round(flex)}°` : "--";
   if (minVis < DEFAULTS.visibilityMin) setHint("Hip, knee and ankle must all be clearly visible.", true);
   else if (segOff) setHint("Leg looks rotated: turn side-on to the camera.", true);
-  else setHint(`Tracking ${side} leg · ${TESTS[mv]?.label ?? "detecting test"}` +
+  else setHint(`Tracking ${side} leg · ${TESTS[mv].label}` +
                `${state.recording ? " · recording" : ""}`, false);
 
   // Live result (trusted frames only): whole recording, or the last 10 s.
@@ -362,7 +346,8 @@ async function analyzeFile(file) {
   sizeCanvas();
   state.rec = newRec("video_file");
   state.liveThigh = []; state.liveShank = []; state.featBuf = []; state.liveGood = [];
-  state.auto = { id: null, confidence: 0, reason: "" }; state.rotationSet = false;
+  state.liveSide = null; state.sideVotes = 0;
+  state.rotationSet = false;
   const step = 1 / clampRate(), dur = video.duration;
   if (!Number.isFinite(dur) || dur <= 0) { setHint("Could not read this video's length.", true); return; }
   ui.progress.hidden = false; ui.btnCamera.disabled = true;
@@ -388,15 +373,10 @@ function finalize(fileName, override = null, scroll = true) {
     setHint("Too few frames with a detected person. Record at least a few seconds.", true);
     return;
   }
-  const autoRes = classifyTest(rec.feats);
-  let movement, chosenBy;
-  if (override) { movement = override; chosenBy = "user"; }
-  else if (ui.movement.value !== "auto") { movement = ui.movement.value; chosenBy = "user"; }
-  else if (autoRes.id) { movement = autoRes.id; chosenBy = "auto"; }
-  else { movement = "unknown"; chosenBy = "none"; }
+  const movement = override ?? ui.movement.value;
   const legPick = ui.side.value !== "auto"
     ? { side: ui.side.value, reason: "set by you" }
-    : pickLeg(rec.feats, TESTS[movement] ? movement : "seated_knee_rom");
+    : pickLeg(rec.feats, movement);
   const side = legPick.side;
   const frames = rec[side];
   const analysis = analyzeFrames(frames);
@@ -406,10 +386,9 @@ function finalize(fileName, override = null, scroll = true) {
   state.evaluation = evaluation;
   state.session = {
     patient_id: null,
-    exercise: TESTS[movement] ? movement : "unknown",
+    exercise: movement,
     evaluation,
-    exercise_detection: { auto_id: autoRes.id, auto_confidence: +autoRes.confidence.toFixed(2),
-                          auto_reason: autoRes.reason, chosen_by: chosenBy },
+    test_selected_by: "user",
     side, side_reason: legPick.reason,
     camera_view: null, coordinate_units: "pixels",
     image_width_px: rec.width, image_height_px: rec.height, frames,
@@ -422,7 +401,7 @@ function finalize(fileName, override = null, scroll = true) {
       recorded_at: new Date().toISOString(),
     },
   };
-  renderResults(analysis, side, rec.noPose, movement, chosenBy, autoRes);
+  renderResults(analysis, side, rec.noPose, movement);
   prefillPrevious();
   $("results").hidden = false;
   if (scroll) $("results").scrollIntoView({ behavior: "smooth" });
@@ -469,13 +448,9 @@ function renderEval(e) {
   }
 }
 
-function renderResults(a, side, noPose, movement, chosenBy, autoRes) {
-  ui.resMovement.value = TESTS[movement] ? movement : "unknown";
-  const how = { user: "set by you", auto: `auto-detected (${Math.round(autoRes.confidence * 100)}%)`,
-                none: "not recognised: pick the test" }[chosenBy];
-  $("resHow").textContent = how + (chosenBy === "user" && autoRes.id && autoRes.id !== movement
-    ? `; auto-detect says ${TESTS[autoRes.id].label}` : "");
-  $("resHow").classList.toggle("warn", chosenBy === "none");
+function renderResults(a, side, noPose, movement) {
+  ui.resMovement.value = movement;
+  $("resHow").textContent = "Wrong test? Change it here and the result is recalculated.";
   const rom = TESTS[movement]?.kind === "rom";
   $("sLag").parentElement.classList.toggle("primary", rom);
   $("sPeak").parentElement.classList.toggle("primary", rom);
@@ -647,7 +622,12 @@ ui.btnCamera.onclick = () => startCamera();
 ui.btnRecord.onclick = () => toggleRecord();
 ui.file.onchange = (e) => analyzeFile(e.target.files[0]).finally(() => { e.target.value = ""; });
 ui.model.onchange = () => loadModel(ui.model.value);
-ui.movement.onchange = () => { state.rotationSet = false; state.rotation = 0; state.liveGood = []; renderMovementChip(); };
+ui.movement.onchange = () => { state.rotationSet = false; state.rotation = 0; state.liveGood = []; renderTest(); };
+// Changing the leg after a recording recalculates the result for that leg.
+ui.side.onchange = () => {
+  state.liveSide = null; state.sideVotes = 0;
+  if (!$("results").hidden && state.rec) finalize(state.lastFileName, ui.resMovement.value, false);
+};
 ui.resMovement.onchange = () => finalize(state.lastFileName, ui.resMovement.value, false);
 ui.facing.onchange = () => { if (state.stream) { stopCamera(); startCamera(); } };
 $("btnShare").onclick = () => share();
@@ -662,5 +642,6 @@ document.addEventListener("visibilitychange", async () => {
 if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
   ui.hint.textContent = "Camera needs HTTPS. Open the GitHub Pages link, not a local file.";
 }
-renderMovementChip();
+try { const saved = localStorage.getItem(TEST_KEY); if (saved && TESTS[saved]) ui.movement.value = saved; } catch { /* optional */ }
+renderTest();
 loadModel("lite");

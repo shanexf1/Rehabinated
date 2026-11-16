@@ -1,6 +1,6 @@
 // Run: node joint-tracker/tests/movement.test.mjs  (from the repo root)
 import assert from "node:assert/strict";
-import { frameFeatures, classifyTest, pickLeg, unrotateLandmarks, countChairStands, TESTS, CHAIR }
+import { frameFeatures, pickLeg, unrotateLandmarks, countChairStands, TESTS, CHAIR }
   from "../js/movement.js";
 import { poseToFrame, analyzeFrames, kneeFlexionDeg } from "../js/kneeAngles.js";
 import { synthPose, rotateLandmarks, truthFlex } from "./synthPose.mjs";
@@ -18,18 +18,6 @@ function run(test, o = {}, seconds = 8, hz = 10) {
   return { feats, frames, truth };
 }
 
-// 1. Each test is recognised, whichever leg moves, including when the moving leg
-//    is farther from the camera (lower visibility) than the still one.
-for (const test of Object.keys(TESTS)) {
-  for (const movingSide of ["right", "left"]) {
-    for (const vis of [{ visMoving: 0.95, visOther: 0.9 }, { visMoving: 0.7, visOther: 0.97 }]) {
-      const c = classifyTest(run(test, { movingSide, ...vis }).feats);
-      assert.equal(c.id, test, `${test} (${movingSide}, ${JSON.stringify(vis)}): got ${c.id} — ${c.reason}`);
-      assert.ok(c.confidence >= 0.5, `${test} confidence ${c.confidence}`);
-    }
-  }
-}
-
 // 2. ROM tests report the moving leg; best extension and max flexion match the truth.
 for (const test of ["lying_knee_rom", "seated_knee_rom"]) {
   for (const movingSide of ["right", "left"]) {
@@ -44,8 +32,11 @@ for (const test of ["lying_knee_rom", "seated_knee_rom"]) {
   }
 }
 
-// 3. Seated still, or standing still: no guess yet / seated.
-assert.equal(classifyTest(run("chair_stand_30s", {}, 0.5).feats).id, null);
+// 3. Chair stand: both legs move, so the best-seen leg is reported.
+{
+  const { feats } = run("chair_stand_30s", { movingSide: "left", visMoving: 0.95, visOther: 0.7 });
+  assert.equal(pickLeg(feats, "chair_stand_30s").side, "left");
+}
 
 // 4. Chair stand counting against the truth, for several paces, with the same
 //    start definition (last seated sample before the first stand).

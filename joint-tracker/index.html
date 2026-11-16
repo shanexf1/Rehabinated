@@ -19,14 +19,15 @@
   <main>
     <section class="movebar">
       <div class="moverow">
-        <span id="moveChip" class="chip move">Detecting test…</span>
-        <label class="inline">Test
+        <label class="field">Test
           <select id="movement" aria-label="Test">
-            <option value="auto">Auto-detect</option>
-            <option value="lying_knee_rom">Lying knee test</option>
             <option value="seated_knee_rom">Seated knee test</option>
+            <option value="lying_knee_rom">Lying knee test</option>
             <option value="chair_stand_30s">30-second chair stand</option>
           </select></label>
+        <label class="field narrow">Leg
+          <select id="side"><option value="auto">Auto</option>
+            <option value="right">Right</option><option value="left">Left</option></select></label>
       </div>
       <p id="moveTip" class="note"></p>
     </section>
@@ -55,9 +56,6 @@
     <details class="settings">
       <summary>Settings</summary>
       <div class="grid">
-        <label>Leg
-          <select id="side"><option value="auto">Auto (side facing camera)</option>
-            <option value="right">Right</option><option value="left">Left</option></select></label>
         <label>Camera
           <select id="facing"><option value="environment">Back</option>
             <option value="user">Front (selfie)</option></select></label>
@@ -80,7 +78,6 @@
             <option value="lying_knee_rom">Lying knee test</option>
             <option value="seated_knee_rom">Seated knee test</option>
             <option value="chair_stand_30s">30-second chair stand</option>
-            <option value="unknown">Not sure</option>
           </select></label>
         <span id="resHow" class="how"></span>
       </div>

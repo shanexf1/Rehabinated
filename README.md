@@ -14,8 +14,8 @@ phone camera ──► MediaPipe Pose (on the phone) ──► knee flexion per 
 
 Live app (after GitHub Pages is enabled): **https://shanexf1.github.io/Rehabinated/joint-tracker/**
 
-It runs three knee evaluation tests, recognises which one you are doing, and lets
-you switch the test by hand if it guessed wrong.
+It runs three knee evaluation tests. You pick the test (and, if needed, the leg)
+before recording; both can be corrected afterwards on the results screen.
 
 | Test | What you do | What it reports |
 |---|---|---|
@@ -27,28 +27,28 @@ How to use it:
 1. Open the link in Safari (iPhone) or Chrome (Android) and allow camera access.
 2. Put the phone side-on to the leg, 2–3 m away, whole body in frame, good light.
    The setup line above the camera explains each test.
-3. **Start camera**. The chip shows the detected test, e.g. "Seated knee test · auto 92%".
-   If it is wrong, pick the test in the **Test** menu; the chip then shows what
-   auto-detect thinks, so you can see when the two disagree.
-4. **Record**, do the test, then **Stop & review**. For the chair stand the app counts
-   down 3, 2, 1, Go and stops by itself after 30 s.
-5. Check the result. You can still change the test on the results screen; the leg and
-   the numbers are recalculated. Then fill in pain and targets and **Share JSON**.
+3. Pick the **Test** (the app remembers your last choice) and the **Leg** (Auto picks
+   the leg that moves most). The line under the menus explains the setup.
+4. **Start camera → Record**, do the test, then **Stop & review**. For the chair stand
+   the app counts down 3, 2, 1, Go and stops by itself after 30 s.
+5. Check the result. If the test or leg was wrong, change it on the results screen or
+   in the Leg menu and the numbers are recalculated. Then fill in pain and targets and
+   **Share JSON**.
 
 How it works:
 - MediaPipe Pose Landmarker (lite or full) runs on the phone, GPU with CPU fallback.
   Video never leaves the phone; only landmark numbers are exported.
-- **Test detection** uses body posture over the last few seconds: torso near horizontal
-  means lying; torso upright with the thigh staying horizontal means seated; the thigh
-  swinging between horizontal and vertical means chair stand.
-- **Which leg**: for the lying and seated tests, the visible leg that moves most (not just
-  the leg nearest the camera); for the chair stand, the best-seen leg. Set by hand in Settings.
+- **The test is always chosen by the user** (no automatic detection).
+- **Which leg** (Auto): for the lying and seated tests, the visible leg that moves most
+  (not just the leg nearest the camera); for the chair stand, the best-seen leg. The live
+  view sticks to one leg and only switches after the other leg has looked better for
+  about a second. Left/Right in the Leg menu overrides it.
 - **Lying down**: pose models find upright people best, so for the lying test the frame
   is rotated 90° (head up) before detection and the points are rotated back. If no person
   is found, the app tries the other orientations.
 - **Chair stand counting**: a stand counts when the knee reaches ≤ 30° after sitting
-  (≥ 65°); a stand is "fully straight" at ≤ 20°. Timing starts at Go (or at the first
-  rise if the test was auto-detected after recording began). If you are more than
+  (≥ 65°); a stand is "fully straight" at ≤ 20°. Timing starts at Go (for an uploaded
+  video, at the first rise). If you are more than
   halfway up at 30 s, that stand counts, as in the OARSI protocol. If you were already
   standing at Go, the result says so.
 - Frame rules match the agent script: visibility < 0.5 rejected, thigh/shank length
@@ -56,7 +56,7 @@ How it works:
 - The last result per patient ID **and test** is remembered on the phone to prefill
   "last session".
 
-Limits: thresholds were tuned on synthetic poses and have not yet been checked on real
+Limits: the leg choice and chair-stand thresholds were tuned on synthetic poses and have not yet been checked on real
 patients or against a goniometer. 2D angles carry several degrees of error and are only
 valid side-on. Hyperextension (below 0°) cannot be measured. Prone (face-down) knee bends
 count as the lying test. The knee-ROM agent skill still covers only the seated
@@ -70,9 +70,9 @@ The preview is not the decision. The exported file goes to the PT or the agent s
 |---|---|
 | `joint-tracker/index.html`, `css/`, `js/app.js` | Phone UI, camera, MediaPipe, recording, export |
 | `joint-tracker/js/kneeAngles.js` | Pure angle and frame-quality functions (no DOM) |
-| `joint-tracker/js/movement.js` | Test definitions, auto-detection, leg choice, lying rotation, chair-stand counting |
+| `joint-tracker/js/movement.js` | Test definitions, leg choice, lying rotation, chair-stand counting |
 | `joint-tracker/tests/kneeAngles.test.mjs` | Checks the JS against the Python script: `node joint-tracker/tests/kneeAngles.test.mjs` |
-| `joint-tracker/tests/movement.test.mjs` | Detection, leg choice, ROM and stand counting on synthetic poses: `node joint-tracker/tests/movement.test.mjs` |
+| `joint-tracker/tests/movement.test.mjs` | Leg choice, ROM and stand counting on synthetic poses: `node joint-tracker/tests/movement.test.mjs` |
 | `joint-tracker/tests/synthPose.mjs` | Synthetic side-view poses for the three tests |
 | `joint-tracker/examples/session_input.json` | Synthetic example session (two planted bad frames) |
 | `agent/skills/knee-rom-markdown/` | Agent skill, Markdown only |
@@ -84,18 +84,18 @@ The preview is not the decision. The exported file goes to the PT or the agent s
 ```json
 {
   "patient_id": "P-anon-01", "exercise": "seated_knee_rom",
-  "exercise_detection": {"auto_id": "seated_knee_rom", "auto_confidence": 0.92, "chosen_by": "auto"},
+  "test_selected_by": "user",
   "side": "left", "side_reason": "leg that moves most",
   "camera_view": "sagittal", "coordinate_units": "pixels",
   "image_width_px": 720, "image_height_px": 1280,
   "frames": [{"t_s": 0.0, "hip": [x, y, vis], "knee": [x, y, vis], "ankle": [x, y, vis]}],
   "evaluation": {"type": "seated_knee_rom", "best_extension_deg": 4.5, "max_flexion_deg": 110.8, "rom_deg": 106.3},
   "pain_0_10": 3,
-  "source": {"app": "rehabinated-joint-tracker", "app_version": "0.2.0", "detection_rotation_deg": 0}
+  "source": {"app": "rehabinated-joint-tracker", "app_version": "0.3.0", "detection_rotation_deg": 0}
 }
 ```
 
-`exercise` is `lying_knee_rom`, `seated_knee_rom`, `chair_stand_30s` or `unknown`.
+`exercise` is `lying_knee_rom`, `seated_knee_rom` or `chair_stand_30s`.
 For the chair stand, `evaluation` holds `stands_30s`, each stand's time and knee angle,
 `fully_straight`, whether the halfway rule was used, and how timing started.
 

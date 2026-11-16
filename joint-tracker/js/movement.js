@@ -1,5 +1,4 @@
-// Knee evaluation tests: body features per frame, automatic test detection, choice
-// of the leg to report, rotation helpers for lying down, and 30-s chair stand
+// Knee evaluation tests: body features per frame, choice of the leg to report, rotation helpers for lying down, and 30-s chair stand
 // counting. Pure functions only (no DOM, no MediaPipe).
 import { kneeFlexionDeg, median } from "./kneeAngles.js";
 
@@ -100,36 +99,6 @@ export function pickLeg(feats, testId) {
   const [a, b] = stats.left.range >= stats.right.range ? ["left", "right"] : ["right", "left"];
   if (stats[a].range - stats[b].range < 10) return { side: byVis, stats, reason: "similar motion: best-seen leg" };
   return { side: a, stats, reason: "leg that moves most" };
-}
-
-// Which test is being done, from a window of frame features (time order).
-// Lying: torso near horizontal. Seated test: upright torso, thigh stays horizontal
-// even when the knee is straight. Chair stand: thigh swings between horizontal
-// (sitting) and vertical (standing).
-export function classifyTest(feats) {
-  const f = feats.filter((x) => x.torsoVis >= VIS_OK && Number.isFinite(x.torsoTilt));
-  if (f.length < 8) return { id: null, confidence: 0, reason: "need a few seconds with the whole body in view" };
-  const torso = median(f.map((x) => x.torsoTilt));
-  if (torso > 55 && torso < 125) {
-    return { id: "lying_knee_rom", confidence: clamp01(0.5 + (Math.min(torso, 180 - torso) - 55) / 50),
-             reason: `torso ${torso.toFixed(0)}° from vertical: lying down` };
-  }
-  if (torso >= 125) return { id: null, confidence: 0, reason: "unusual body orientation" };
-  const { side } = pickLeg(f, "seated_knee_rom");
-  const leg = f.filter((x) => x.legs[side].vis >= VIS_OK);
-  if (leg.length < 8) return { id: null, confidence: 0, reason: "hip, knee and ankle not visible" };
-  const thigh = leg.map((x) => x.legs[side].thighTilt);
-  const lo = pct(thigh, 10), hi = pct(thigh, 90);
-  if (lo < 35 && hi > 55) {
-    return { id: "chair_stand_30s", confidence: clamp01(0.5 + Math.min(35 - lo, hi - 55) / 30),
-             reason: `thigh moves between ${lo.toFixed(0)}° and ${hi.toFixed(0)}° from vertical: sit-to-stand` };
-  }
-  if (lo >= 50) {
-    return { id: "seated_knee_rom", confidence: clamp01(0.5 + (lo - 50) / 40),
-             reason: `upright torso, thigh stays ${lo.toFixed(0)}°+ from vertical: sitting` };
-  }
-  if (hi < 35) return { id: null, confidence: 0, reason: "standing: sit down to start a test" };
-  return { id: null, confidence: 0, reason: "posture unclear" };
 }
 
 // Rotation that shows a lying person upright to the pose model.
