@@ -1,9 +1,9 @@
 // Run: node joint-tracker/tests/movement.test.mjs  (from the repo root)
 import assert from "node:assert/strict";
-import { frameFeatures, classifyTest, pickLeg, unrotateLandmarks, countChairStands, TESTS, CHAIR }
+import { frameFeatures, pickLeg, unrotateLandmarks, countChairStands, analyzeSLR, analyzeBalance, TESTS, CHAIR, SLR }
   from "../js/movement.js";
 import { poseToFrame, analyzeFrames, kneeFlexionDeg } from "../js/kneeAngles.js";
-import { synthPose, rotateLandmarks, truthFlex } from "./synthPose.mjs";
+import { synthPose, rotateLandmarks, truthFlex, truthHipSLR } from "./synthPose.mjs";
 
 function run(test, o = {}, seconds = 8, hz = 10) {
   const feats = [], frames = { left: [], right: [] }, truth = [];
@@ -16,18 +16,6 @@ function run(test, o = {}, seconds = 8, hz = 10) {
     truth.push(flex);
   }
   return { feats, frames, truth };
-}
-
-// 1. Each test is recognised, whichever leg moves, including when the moving leg
-//    is farther from the camera (lower visibility) than the still one.
-for (const test of Object.keys(TESTS)) {
-  for (const movingSide of ["right", "left"]) {
-    for (const vis of [{ visMoving: 0.95, visOther: 0.9 }, { visMoving: 0.7, visOther: 0.97 }]) {
-      const c = classifyTest(run(test, { movingSide, ...vis }).feats);
-      assert.equal(c.id, test, `${test} (${movingSide}, ${JSON.stringify(vis)}): got ${c.id} — ${c.reason}`);
-      assert.ok(c.confidence >= 0.5, `${test} confidence ${c.confidence}`);
-    }
-  }
 }
 
 // 2. ROM tests report the moving leg; best extension and max flexion match the truth.
@@ -44,8 +32,11 @@ for (const test of ["lying_knee_rom", "seated_knee_rom"]) {
   }
 }
 
-// 3. Seated still, or standing still: no guess yet / seated.
-assert.equal(classifyTest(run("chair_stand_30s", {}, 0.5).feats).id, null);
+// 3. Chair stand: both legs move, so the best-seen leg is reported.
+{
+  const { feats } = run("chair_stand_30s", { movingSide: "left", visMoving: 0.95, visOther: 0.7 });
+  assert.equal(pickLeg(feats, "chair_stand_30s").side, "left");
+}
 
 // 4. Chair stand counting against the truth, for several paces, with the same
 //    start definition (last seated sample before the first stand).
@@ -96,5 +87,60 @@ for (const rot of [90, -90]) {
   });
 }
 assert.ok(frameFeatures(rotateLandmarks(landmarks, 90), 720, 1280).torsoTilt < 20);
+
+// 6. Straight leg raise: the lifting leg is chosen by hip motion (its knee hardly moves),
+//    and lifts, lift height, knee lag at the top and hold time match the truth.
+for (const lag of [0, 12]) {
+  for (const movingSide of ["left", "right"]) {
+    const o = { movingSide, visMoving: 0.7, visOther: 0.97, lag };
+    const { feats, frames } = run("straight_leg_raise", o, 24);
+    const leg = pickLeg(feats, "straight_leg_raise");
+    assert.equal(leg.side, movingSide, `SLR leg: ${leg.side} (${leg.reason})`);
+    const series = feats.map((f, i) => ({ t: frames.left[i].t_s, hip: f.legs[leg.side].hipFlex, knee: f.legs[leg.side].flex }));
+    const r = analyzeSLR(series);
+    assert.equal(r.reps.length, 4, `SLR reps ${r.reps.length}`);
+    assert.ok(Math.abs(r.lag_median_deg - (lag + 2)) < 2.5, `SLR lag ${r.lag_median_deg} vs ${lag + 2}`);
+    assert.ok(Math.abs(r.lift_median_deg - 40) < 3, `SLR lift ${r.lift_median_deg}`);
+    const ts = Array.from({ length: 600 }, (_, i) => i / 100).filter((t) => truthHipSLR(t) >= SLR.topFraction * 40);
+    const trueHold = ts.at(-1) - ts[0];
+    assert.ok(Math.abs(r.hold_median_s - trueHold) < 0.3, `SLR hold ${r.hold_median_s} vs ${trueHold}`);
+  }
+}
+// The resting leg (knee bent, foot flat: hip ~45 deg, never down on the floor) gives no lifts.
+{
+  const { feats, frames } = run("straight_leg_raise", { movingSide: "left" }, 24);
+  const r = analyzeSLR(feats.map((f, i) => ({ t: frames.left[i].t_s, hip: f.legs.right.hipFlex, knee: f.legs.right.flex })));
+  assert.equal(r.reps.length, 0, `resting leg lifts: ${r.reps.length}`);
+}
+// A lift still in progress when recording ends is flagged.
+{
+  const { feats, frames } = run("straight_leg_raise", {}, 15);
+  const r = analyzeSLR(feats.map((f, i) => ({ t: frames.left[i].t_s, hip: f.legs.right.hipFlex, knee: f.legs.right.flex })));
+  assert.equal(r.unfinished, true);
+}
+
+// 7. Single-leg stand: stance leg found automatically; each hold matches the schedule
+//    (12 s, 20.5 s, 5.5 s); a hold past 30 s is capped.
+for (const stance of ["right", "left"]) {
+  const { frames } = run("single_leg_stand", { stance }, 48);
+  const r = analyzeBalance(frames.left, frames.right);
+  assert.equal(r.stance, stance, `stance ${r.stance}`);
+  const holds = r.attempts.map((a) => a.hold_s);
+  [12, 20.5, 5.5].forEach((want, i) => assert.ok(Math.abs(holds[i] - want) < 0.25, `hold ${i}: ${holds[i]} vs ${want}`));
+  assert.ok(Math.abs(r.best_s - 20.5) < 0.25);
+}
+{
+  const { frames } = run("single_leg_stand", { schedule: [[1, 40]] }, 42);
+  const r = analyzeBalance(frames.left, frames.right);
+  assert.equal(r.attempts.length, 1);
+  assert.equal(r.attempts[0].hold_s, 30);
+  assert.equal(r.attempts[0].ended, "30 s reached");
+  // Leg menu set by hand: the given stance leg is used.
+  assert.equal(analyzeBalance(frames.left, frames.right, { stance: "right" }).stance, "right");
+}
+{
+  const { frames } = run("single_leg_stand", { schedule: [] }, 10);
+  assert.equal(analyzeBalance(frames.left, frames.right).stance, null);   // never lifted
+}
 
 console.log("all movement tests passed");

@@ -4,7 +4,7 @@ import { FilesetResolver, PoseLandmarker } from
   "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/vision_bundle.mjs";
 import { analyzeFrames, poseToFrame, sideVisibility, kneeFlexionDeg, median, DEFAULTS }
   from "./kneeAngles.js";
-import { TESTS, CHAIR, frameFeatures, classifyTest, pickLeg, rotationForHead, unrotateLandmarks,
+import { TESTS, CHAIR, SLR, BALANCE, analyzeSLR, analyzeBalance, frameFeatures, pickLeg, rotationForHead, unrotateLandmarks,
   drawRotated, countChairStands } from "./movement.js";
 
 const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm";
@@ -12,7 +12,7 @@ const MODEL_URLS = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
   full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
 };
-const APP_VERSION = "0.2.0";
+const APP_VERSION = "0.4.0";
 const ROTATION_CYCLE = [90, -90, 0];
 
 const $ = (id) => document.getElementById(id);
@@ -22,7 +22,7 @@ const ui = {
   btnCamera: $("btnCamera"), btnRecord: $("btnRecord"), file: $("fileInput"),
   rec: $("recBadge"), recCount: $("recCount"), progress: $("progress"), bar: $("progressBar"),
   side: $("side"), facing: $("facing"), model: $("model"), rate: $("rate"),
-  movement: $("movement"), moveChip: $("moveChip"), moveTip: $("moveTip"), best: $("best"),
+  movement: $("movement"), moveTip: $("moveTip"), best: $("best"),
   resMovement: $("resMovement"), countdown: $("countdown"),
 };
 
@@ -32,7 +32,7 @@ const state = {
   recording: false, recStart: 0, lastRecT: -Infinity,
   rec: null, // { left: [], right: [], feats: [], noPose: 0, width, height, mode, rotations: {} }
   liveThigh: [], liveShank: [],
-  featBuf: [], lastClassifyT: 0, auto: { id: null, confidence: 0, reason: "" }, pendingAuto: null,
+  featBuf: [], sideVotes: 0, liveSlr: [], liveBal: [],
   rotation: 0, noPoseStreak: 0, rotCanvas: null, liveGood: [], countingDown: false,
   session: null, analysis: null,
 };
@@ -41,7 +41,7 @@ window.__tracker = state; // debugging / browser tests (no personal data)
 
 // The movement in force: the user's choice, else the auto-detected one (may be null).
 function currentMovement() {
-  return ui.movement.value !== "auto" ? ui.movement.value : state.auto.id;
+  return ui.movement.value;
 }
 
 // ---------- model ----------
@@ -96,8 +96,8 @@ async function startCamera() {
   }
   video.removeAttribute("src");
   state.featBuf = []; state.liveGood = []; state.rotationSet = false; state.rotation = 0;
-  state.auto = { id: null, confidence: 0, reason: "" }; state.pendingAuto = null;
-  renderMovementChip();
+  state.liveSide = null; state.sideVotes = 0; state.liveSlr = []; state.liveBal = [];
+  renderTest();
   video.srcObject = state.stream;
   await video.play();
   sizeCanvas();
@@ -166,40 +166,33 @@ function detect(ts) {
   return undefined;
 }
 
-// ---------- movement ----------
-let classifyTick = 0;
-function updateAuto(force = false) {
-  if (!force && ++classifyTick % 10 !== 0) return;
-  const c = classifyTest(state.featBuf.slice(-120));
-  if (c.id && c.id !== state.auto.id) {
-    // Switch only when two checks in a row agree, so the label doesn't flicker.
-    if (state.pendingAuto === c.id || !state.auto.id) { state.auto = c; state.pendingAuto = null; }
-    else state.pendingAuto = c.id;
-  } else if (c.id) { state.auto = c; state.pendingAuto = null; }
-  renderMovementChip();
-}
-
-function renderMovementChip() {
-  const manual = ui.movement.value !== "auto";
-  const mv = currentMovement();
-  let text;
-  if (manual) {
-    text = `${TESTS[mv].label} · set by you`;
-    if (state.auto.id && state.auto.id !== mv) text += ` (auto-detect says ${TESTS[state.auto.id].label})`;
-  } else if (state.auto.id) {
-    text = `${TESTS[state.auto.id].label} · auto ${Math.round(state.auto.confidence * 100)}%`;
-  } else text = state.auto.reason ? `Detecting test… (${state.auto.reason})` : "Detecting test…";
-  ui.moveChip.textContent = text;
-  ui.moveChip.title = state.auto.reason || "";
-  ui.moveTip.textContent = TESTS[mv]?.setup ??
-    "Film from the side with the whole body in view. The app recognises the test (lying, seated or chair stand), or pick it here.";
+// ---------- test choice ----------
+const TEST_KEY = "kneeTest";
+function renderTest() {
+  const t = TESTS[currentMovement()];
+  ui.moveTip.textContent = t.setup;
+  $("viewLabel").textContent = t.view === "frontal" ? "Filmed from the front, whole body in view" : "Filmed from the side (sagittal view)";
+  $("angleLabel").textContent = t.kind === "balance" ? "Standing on one leg" : t.kind === "slr" ? "Knee bend (0° = straight)" : "Knee flexion";
+  try { localStorage.setItem(TEST_KEY, currentMovement()); } catch { /* optional */ }
 }
 
 // ---------- per-frame handling ----------
+// Live leg: sticky, so the display doesn't jump between legs. Switch only after the
+// other leg has looked better for ~1 s of frames in a row.
 function chooseSide(lm) {
   if (ui.side.value !== "auto") return ui.side.value;
-  if (state.featBuf.length >= 8) return pickLeg(state.featBuf.slice(-90), currentMovement() ?? "seated_knee_rom").side;
-  return sideVisibility(lm, "right") >= sideVisibility(lm, "left") ? "right" : "left";
+  let guess;
+  if (TESTS[currentMovement()].kind === "balance") {
+    const la = lm[27], ra = lm[28];                       // stance leg = the foot that is lower
+    guess = Math.abs(la.y - ra.y) > 0.02 ? (la.y > ra.y ? "left" : "right") : (state.liveSide ?? "right");
+  } else {
+    guess = state.featBuf.length >= 8
+      ? pickLeg(state.featBuf.slice(-90), currentMovement()).side
+      : (sideVisibility(lm, "right") >= sideVisibility(lm, "left") ? "right" : "left");
+  }
+  if (!state.liveSide) return guess;
+  if (guess === state.liveSide) { state.sideVotes = 0; return state.liveSide; }
+  return ++state.sideVotes >= 30 ? (state.sideVotes = 0, guess) : state.liveSide;
 }
 
 function handlePose(lm, tSec, live) {
@@ -215,7 +208,6 @@ function handlePose(lm, tSec, live) {
   }
   const feats = frameFeatures(lm, W, H);
   pushWindow(state.featBuf, feats, 180);
-  updateAuto();
   const mv = currentMovement();
   if (TESTS[mv]?.lying && !state.rotationSet) {
     state.rotation = rotationForHead(feats.headLeft);
@@ -238,16 +230,28 @@ function handlePose(lm, tSec, live) {
     }
   }
   const ok = minVis >= DEFAULTS.visibilityMin && !segOff;
+  const kind = TESTS[mv].kind;
+  if (kind === "balance") drawLeg(poseToFrame(lm, side === "left" ? "right" : "left", W, H, tSec), true, true);
   drawLeg(f, ok);
   ui.angle.textContent = Number.isFinite(flex) ? `${Math.round(flex)}°` : "--";
   if (minVis < DEFAULTS.visibilityMin) setHint("Hip, knee and ankle must all be clearly visible.", true);
   else if (segOff) setHint("Leg looks rotated: turn side-on to the camera.", true);
-  else setHint(`Tracking ${side} leg · ${TESTS[mv]?.label ?? "detecting test"}` +
+  else if (kind === "slr") setHint(`Leg lifted ${Math.max(0, Math.round(feats.legs[side].hipFlex))}° · ${side} leg` +
+               `${state.recording ? " · recording" : ""}`, false);
+  else if (kind === "balance") setHint(`Standing on ${side} leg${state.recording ? " · recording" : ""}`, false);
+  else setHint(`Tracking ${side} leg · ${TESTS[mv].label}` +
                `${state.recording ? " · recording" : ""}`, false);
 
   // Live result (trusted frames only): whole recording, or the last 10 s.
   if (ok && Number.isFinite(flex)) state.liveGood.push({ t: tSec, flex });
-  if (!state.recording) state.liveGood = state.liveGood.filter((g) => g.t > tSec - 10);
+  // Keep both legs, so the live lift summary always reads the leg currently chosen.
+  state.liveSlr.push({ t: tSec, left: feats.legs.left, right: feats.legs.right });
+  state.liveBal.push({ left: poseToFrame(lm, "left", W, H, tSec), right: poseToFrame(lm, "right", W, H, tSec) });
+  if (!state.recording) {
+    state.liveGood = state.liveGood.filter((g) => g.t > tSec - 10);
+    state.liveSlr = state.liveSlr.filter((g) => g.t > tSec - 15);
+  }
+  if (state.liveBal.length > 2400) state.liveBal.shift();
   ui.best.textContent = liveSummary(mv, tSec);
 
   const record = live ? state.recording : true;
@@ -256,8 +260,10 @@ function handlePose(lm, tSec, live) {
   if (live && tSec - state.lastRecT < 1 / rate) return;
   state.lastRecT = tSec;
   // Store both legs and body features so the leg and movement can be (re)chosen later.
-  state.rec.left.push(poseToFrame(lm, "left", W, H, tSec));
-  state.rec.right.push(poseToFrame(lm, "right", W, H, tSec));
+  const shoulderPx = (i) => [Math.round(lm[i].x * W * 10) / 10, Math.round(lm[i].y * H * 10) / 10,
+                              Math.round((lm[i].visibility ?? 0) * 1000) / 1000];
+  state.rec.left.push({ ...poseToFrame(lm, "left", W, H, tSec), shoulder: shoulderPx(11) });
+  state.rec.right.push({ ...poseToFrame(lm, "right", W, H, tSec), shoulder: shoulderPx(12) });
   state.rec.feats.push(feats);
   ui.recCount.textContent = String(state.rec.right.length);
 }
@@ -273,6 +279,21 @@ function liveSummary(mv, tSec) {
     if (tSec - r.t0 >= CHAIR.windowS + 0.5) requestAutoStop();   // keep 0.5 s past the window
     return `Stands: ${r.reps} · ${Math.ceil(left)} s left`;
   }
+  if (TESTS[mv]?.kind === "slr") {
+    const sideNow = state.liveSide ?? "right", vmin = DEFAULTS.visibilityMin;
+    const r = analyzeSLR(state.liveSlr.filter((e) => e[sideNow].vis >= vmin && e[sideNow].hipVis >= vmin)
+                                      .map((e) => ({ t: e.t, hip: e[sideNow].hipFlex, knee: e[sideNow].flex })));
+    if (!r.reps.length) return "Lift the straight leg to start counting.";
+    return `Lifts: ${r.reps.length} · knee bend at the top: ${Math.round(r.lag_median_deg)}° · lift ${Math.round(r.lift_median_deg)}°`;
+  }
+  if (TESTS[mv]?.kind === "balance") {
+    const r = analyzeBalance(state.liveBal.map((b) => b.left), state.liveBal.map((b) => b.right),
+                             ui.side.value !== "auto" ? { stance: ui.side.value } : {});
+    const now = r.ongoing ? r.ongoing.hold_s : NaN;
+    ui.angle.textContent = Number.isFinite(now) ? `${now.toFixed(1)} s` : "--";
+    const best = Number.isFinite(r.best_s) ? ` · best ${r.best_s.toFixed(1)} s` : "";
+    return Number.isFinite(now) ? `Holding${best}` : `Lift one foot to start the timer${best}`;
+  }
   const when = state.recording ? "this recording" : "last 10 s";
   return `Best straightening ${Math.round(Math.min(...vals))}° · deepest bend ${Math.round(Math.max(...vals))}° (${when})`;
 }
@@ -286,10 +307,10 @@ function requestAutoStop() {
 
 function pushWindow(arr, v, n = 45) { arr.push(v); if (arr.length > n) arr.shift(); }
 
-function drawLeg(f, ok) {
-  const lw = Math.max(3, canvas.width / 160);
+function drawLeg(f, ok, secondary = false) {
+  const lw = Math.max(3, canvas.width / 160) * (secondary ? 0.7 : 1);
   ctx.lineCap = "round"; ctx.lineJoin = "round";
-  ctx.strokeStyle = ok ? "#3987e5" : "#c98500";
+  ctx.strokeStyle = secondary ? "#8f8e86" : ok ? "#3987e5" : "#c98500";
   ctx.lineWidth = lw;
   ctx.beginPath();
   ctx.moveTo(f.hip[0], f.hip[1]); ctx.lineTo(f.knee[0], f.knee[1]); ctx.lineTo(f.ankle[0], f.ankle[1]);
@@ -328,6 +349,7 @@ function startRecording(chairStartT) {
   state.rec = newRec("camera");
   state.rec.chairStartT = chairStartT;
   state.recStart = performance.now(); state.lastRecT = -Infinity; state.liveGood = [];
+  state.liveSlr = []; state.liveBal = [];
   state.lastFileName = null;
   state.recording = true;
   ui.btnRecord.textContent = "Stop & review"; ui.btnRecord.classList.add("recording");
@@ -362,7 +384,8 @@ async function analyzeFile(file) {
   sizeCanvas();
   state.rec = newRec("video_file");
   state.liveThigh = []; state.liveShank = []; state.featBuf = []; state.liveGood = [];
-  state.auto = { id: null, confidence: 0, reason: "" }; state.rotationSet = false;
+  state.liveSide = null; state.sideVotes = 0; state.liveSlr = []; state.liveBal = [];
+  state.rotationSet = false;
   const step = 1 / clampRate(), dur = video.duration;
   if (!Number.isFinite(dur) || dur <= 0) { setHint("Could not read this video's length.", true); return; }
   ui.progress.hidden = false; ui.btnCamera.disabled = true;
@@ -388,28 +411,27 @@ function finalize(fileName, override = null, scroll = true) {
     setHint("Too few frames with a detected person. Record at least a few seconds.", true);
     return;
   }
-  const autoRes = classifyTest(rec.feats);
-  let movement, chosenBy;
-  if (override) { movement = override; chosenBy = "user"; }
-  else if (ui.movement.value !== "auto") { movement = ui.movement.value; chosenBy = "user"; }
-  else if (autoRes.id) { movement = autoRes.id; chosenBy = "auto"; }
-  else { movement = "unknown"; chosenBy = "none"; }
-  const legPick = ui.side.value !== "auto"
-    ? { side: ui.side.value, reason: "set by you" }
-    : pickLeg(rec.feats, TESTS[movement] ? movement : "seated_knee_rom");
-  const side = legPick.side;
-  const frames = rec[side];
-  const analysis = analyzeFrames(frames);
+  const movement = override ?? ui.movement.value;
+  const kind = TESTS[movement].kind;
+  let legPick;
+  if (ui.side.value !== "auto") legPick = { side: ui.side.value, reason: "set by you" };
+  else if (kind === "balance") {
+    const st = analyzeBalance(rec.left, rec.right).stance;
+    legPick = st ? { side: st, reason: "foot that stayed on the floor" } : { side: "right", reason: "no lifted foot found" };
+  } else legPick = pickLeg(rec.feats, movement);
+  const side = legPick.side, other = side === "left" ? "right" : "left";
+  // Single-leg stand also exports the lifted foot's ankle, which the hold time is based on.
+  const frames = kind === "balance" ? rec[side].map((f, i) => ({ ...f, other_ankle: rec[other][i].ankle })) : rec[side];
+  const analysis = analyzeFrames(rec[side]);
   const rotUsed = Object.entries(rec.rotations).sort((a, b) => b[1] - a[1])[0]?.[0];
-  const evaluation = evaluate(movement, analysis, rec);
+  const evaluation = evaluate(movement, analysis, rec, side);
   state.analysis = analysis;
   state.evaluation = evaluation;
   state.session = {
     patient_id: null,
-    exercise: TESTS[movement] ? movement : "unknown",
+    exercise: movement,
     evaluation,
-    exercise_detection: { auto_id: autoRes.id, auto_confidence: +autoRes.confidence.toFixed(2),
-                          auto_reason: autoRes.reason, chosen_by: chosenBy },
+    test_selected_by: "user",
     side, side_reason: legPick.reason,
     camera_view: null, coordinate_units: "pixels",
     image_width_px: rec.width, image_height_px: rec.height, frames,
@@ -422,7 +444,7 @@ function finalize(fileName, override = null, scroll = true) {
       recorded_at: new Date().toISOString(),
     },
   };
-  renderResults(analysis, side, rec.noPose, movement, chosenBy, autoRes);
+  renderResults(analysis, side, rec.noPose, movement);
   prefillPrevious();
   $("results").hidden = false;
   if (scroll) $("results").scrollIntoView({ behavior: "smooth" });
@@ -432,7 +454,30 @@ const deg = (v) => (Number.isFinite(v) ? `${v.toFixed(1)}°` : "--");
 const r1 = (v) => (Number.isFinite(v) ? Math.round(v * 10) / 10 : null);
 
 // Test-specific result, computed from trusted frames only.
-function evaluate(test, a, rec) {
+function evaluate(test, a, rec, side) {
+  if (TESTS[test]?.kind === "slr") {
+    const series = a.rows.map((r, i) => ({ r, f: rec.feats[i]?.legs[side] }))
+      .filter(({ r, f }) => r.status === "valid" && f && f.hipVis >= DEFAULTS.visibilityMin)
+      .map(({ r, f }) => ({ t: r.t_s, hip: f.hipFlex, knee: r.flexion_deg }));
+    const s = analyzeSLR(series);
+    return {
+      type: "straight_leg_raise", lifts: s.reps.length, last_lift_unfinished: s.unfinished,
+      knee_bend_at_top_median_deg: r1(s.lag_median_deg), knee_bend_at_top_worst_deg: r1(s.lag_worst_deg),
+      lift_height_median_deg: r1(s.lift_median_deg), hold_median_s: r1(s.hold_median_s),
+      reps: s.reps.map((x) => ({ t_s: r1(x.t_start), lift_deg: r1(x.peak_lift_deg), knee_bend_median_deg: r1(x.lag_median_deg),
+                                  knee_bend_max_deg: r1(x.lag_max_deg), hold_s: r1(x.hold_s) })),
+      thresholds_deg: { lift_starts: SLR.liftOnDeg, lift_ends: SLR.liftOffDeg },
+      note: "Knee bend at the top of the lift is the extensor (quad) lag. Lift height is hip flexion from the shoulder-hip line.",
+    };
+  }
+  if (TESTS[test]?.kind === "balance") {
+    const b = analyzeBalance(rec.left, rec.right, { stance: side });
+    return {
+      type: "single_leg_stand", stance_leg: side, attempts_count: b.attempts.length, best_hold_s: r1(b.best_s),
+      attempts: b.attempts.map((x) => ({ t_s: r1(x.t_start), hold_s: r1(x.hold_s), ended: x.ended })),
+      cap_s: BALANCE.capS, note: b.note,
+    };
+  }
   if (TESTS[test]?.kind === "chair_stand") {
     const series = a.rows.filter((r) => r.status === "valid").map((r) => ({ t: r.t_s, flex: r.flexion_deg }));
     const c = countChairStands(series, { startT: rec.chairStartT ?? null });
@@ -460,6 +505,18 @@ function renderEval(e) {
       `<span class="sub2">${e.halfway_stand_counted ? "Includes one stand more than halfway up at 30 s. " : ""}` +
       `${bent ? `${bent} stand${bent > 1 ? "s" : ""} without a fully straight knee (&gt; ${e.thresholds_deg.fully_straight}°). ` : "Knee straight at every stand. "}` +
       `Timed ${e.timing}. ${e.note}</span>`;
+  } else if (e.type === "straight_leg_raise") {
+    box.innerHTML = e.lifts
+      ? `<span class="big">${e.lifts}</span> lift${e.lifts > 1 ? "s" : ""} · knee bend at the top <span class="big">${e.knee_bend_at_top_median_deg}°</span>` +
+        `<span class="sub2">Worst ${e.knee_bend_at_top_worst_deg}° · leg lifted ${e.lift_height_median_deg}° · held ${e.hold_median_s} s (medians). ` +
+        `0° = knee fully straight while lifting; a knee that bends during the lift (extensor lag) is worth showing your PT.` +
+        `${e.last_lift_unfinished ? " The last lift was still going when recording stopped." : ""}</span>`
+      : `<span class="sub2">No lift found: lift the straight leg at least ${e.thresholds_deg.lift_starts}° off the floor.</span>`;
+  } else if (e.type === "single_leg_stand") {
+    box.innerHTML = e.attempts_count
+      ? `Best <span class="big">${e.best_hold_s} s</span> on the ${e.stance_leg} leg` +
+        `<span class="sub2">${e.attempts.map((a) => `${a.hold_s} s (${a.ended})`).join(" · ")}. Each attempt is capped at ${e.cap_s} s.</span>`
+      : `<span class="sub2">No lifted foot found: lift one foot clearly off the floor. ${e.note}</span>`;
   } else if (e.type === "unknown") {
     box.innerHTML = `<span class="sub2">Pick the test above to see its result.</span>`;
   } else {
@@ -469,13 +526,10 @@ function renderEval(e) {
   }
 }
 
-function renderResults(a, side, noPose, movement, chosenBy, autoRes) {
-  ui.resMovement.value = TESTS[movement] ? movement : "unknown";
-  const how = { user: "set by you", auto: `auto-detected (${Math.round(autoRes.confidence * 100)}%)`,
-                none: "not recognised: pick the test" }[chosenBy];
-  $("resHow").textContent = how + (chosenBy === "user" && autoRes.id && autoRes.id !== movement
-    ? `; auto-detect says ${TESTS[autoRes.id].label}` : "");
-  $("resHow").classList.toggle("warn", chosenBy === "none");
+function renderResults(a, side, noPose, movement) {
+  ui.resMovement.value = movement;
+  $("results").classList.toggle("balance", TESTS[movement].kind === "balance");
+  $("resHow").textContent = "Wrong test? Change it here and the result is recalculated.";
   const rom = TESTS[movement]?.kind === "rom";
   $("sLag").parentElement.classList.toggle("primary", rom);
   $("sPeak").parentElement.classList.toggle("primary", rom);
@@ -572,7 +626,7 @@ const num = (id) => { const v = $(id).value.trim(); return v === "" ? null : Num
 function buildSession() {
   const s = structuredClone(state.session);
   s.patient_id = $("pid").value.trim() || "P-anon";
-  s.camera_view = $("sagittal").checked ? "sagittal" : "unknown";
+  s.camera_view = $("sagittal").checked ? (TESTS[s.exercise].view ?? "sagittal") : "unknown";
   const tLag = num("tLag"), tRom = num("tRom");
   if (tLag != null && tRom != null) s.targets = { max_extension_lag_deg: tLag, min_rom_deg: tRom };
   const pain = num("pain");
@@ -647,7 +701,12 @@ ui.btnCamera.onclick = () => startCamera();
 ui.btnRecord.onclick = () => toggleRecord();
 ui.file.onchange = (e) => analyzeFile(e.target.files[0]).finally(() => { e.target.value = ""; });
 ui.model.onchange = () => loadModel(ui.model.value);
-ui.movement.onchange = () => { state.rotationSet = false; state.rotation = 0; state.liveGood = []; renderMovementChip(); };
+ui.movement.onchange = () => { state.rotationSet = false; state.rotation = 0; state.liveGood = []; renderTest(); };
+// Changing the leg after a recording recalculates the result for that leg.
+ui.side.onchange = () => {
+  state.liveSide = null; state.sideVotes = 0;
+  if (!$("results").hidden && state.rec) finalize(state.lastFileName, ui.resMovement.value, false);
+};
 ui.resMovement.onchange = () => finalize(state.lastFileName, ui.resMovement.value, false);
 ui.facing.onchange = () => { if (state.stream) { stopCamera(); startCamera(); } };
 $("btnShare").onclick = () => share();
@@ -662,5 +721,6 @@ document.addEventListener("visibilitychange", async () => {
 if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
   ui.hint.textContent = "Camera needs HTTPS. Open the GitHub Pages link, not a local file.";
 }
-renderMovementChip();
+try { const saved = localStorage.getItem(TEST_KEY); if (saved && TESTS[saved]) ui.movement.value = saved; } catch { /* optional */ }
+renderTest();
 loadModel("lite");
