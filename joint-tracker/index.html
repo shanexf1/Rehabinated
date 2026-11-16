@@ -11,12 +11,26 @@
   <header class="bar">
     <div>
       <h1>Knee tracker</h1>
-      <p class="sub">Rehabinated · seated knee extension</p>
+      <p class="sub">Rehabinated · knee evaluation</p>
     </div>
     <span id="modelStatus" class="chip">Loading pose model…</span>
   </header>
 
   <main>
+    <section class="movebar">
+      <div class="moverow">
+        <span id="moveChip" class="chip move">Detecting test…</span>
+        <label class="inline">Test
+          <select id="movement" aria-label="Test">
+            <option value="auto">Auto-detect</option>
+            <option value="lying_knee_rom">Lying knee test</option>
+            <option value="seated_knee_rom">Seated knee test</option>
+            <option value="chair_stand_30s">30-second chair stand</option>
+          </select></label>
+      </div>
+      <p id="moveTip" class="note"></p>
+    </section>
+
     <section class="stage" id="stage">
       <video id="video" playsinline muted></video>
       <canvas id="overlay"></canvas>
@@ -24,7 +38,9 @@
         <span class="label">Knee flexion</span>
         <span id="angle" class="angle">--</span>
         <span id="hint" class="hint">Start the camera, then film the leg from the side.</span>
+        <span id="best" class="best"></span>
       </div>
+      <div id="countdown" class="countdown" hidden aria-live="assertive"></div>
       <div id="recBadge" class="rec" hidden>● REC <span id="recCount">0</span></div>
       <div id="progress" class="progress" hidden><div id="progressBar"></div></div>
     </section>
@@ -58,8 +74,18 @@
 
     <section id="results" class="card" hidden>
       <h2>Session preview</h2>
-      <p class="note">Preview only. The agent skill makes the on-track / below-target /
-        clinician-review decision from the exported file.</p>
+      <div class="moverow">
+        <label class="inline">Test
+          <select id="resMovement" aria-label="Test for this session">
+            <option value="lying_knee_rom">Lying knee test</option>
+            <option value="seated_knee_rom">Seated knee test</option>
+            <option value="chair_stand_30s">30-second chair stand</option>
+            <option value="unknown">Not sure</option>
+          </select></label>
+        <span id="resHow" class="how"></span>
+      </div>
+      <p id="evalBox" class="evalbox"></p>
+      <p class="note">Preview only. Share the file with your PT or the agent for the decision.</p>
       <div class="stats">
         <div><span class="k">Extension lag</span><span id="sLag" class="v">--</span></div>
         <div><span class="k">Peak flexion</span><span id="sPeak" class="v">--</span></div>
