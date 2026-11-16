@@ -113,3 +113,5 @@ label.inline select { min-height: 38px; font-size: 0.92rem; }
 label.field { flex: 1 1 0; font-size: 0.82rem; }
 label.field.narrow { flex: 0 0 110px; }
 label.field select { min-height: 46px; font-size: 1rem; font-weight: 600; }
+
+#results.balance .stats, #results.balance .viz-root, #results.balance #quality { display: none; }

@@ -15,12 +15,41 @@ export const TESTS = Object.freeze({
     setup: "Sit side-on on a firm chair, phone at knee height about 2 m away. " +
            "1) Straighten the knee as far as you can and hold 2 s. 2) Slide the foot back under the chair as far as you can. Repeat 2–3 times.",
   },
+  straight_leg_raise: {
+    label: "Straight leg raise",
+    kind: "slr", singleLeg: true, lying: true, pickBy: "hip",
+    setup: "Lie on your back, side-on to the phone. Phone on the floor in landscape at hip level, about 2 m away. " +
+           "Bend the other knee with the foot flat. Tighten the thigh, lift the straight leg to the height of the other knee, " +
+           "hold 3 s, lower slowly. Repeat 3–5 times.",
+  },
+  single_leg_stand: {
+    label: "Single-leg stand",
+    kind: "balance", singleLeg: false, lying: false, view: "frontal",
+    setup: "Face the phone with your whole body in frame, 2–3 m away, a chair within reach. Stand on the leg you are testing, " +
+           "lift the other foot off the floor and hold as long as you can (up to 30 s). Foot down, rest, repeat 2–3 times.",
+  },
   chair_stand_30s: {
     label: "30-second chair stand",
     kind: "chair_stand", singleLeg: false, lying: false,
     setup: "Chair against a wall, arms crossed on your chest, side-on to the phone. Press Record, wait for Go, " +
            "then stand up fully and sit down as many times as you can. The app stops after 30 s.",
   },
+});
+
+export const SLR = Object.freeze({
+  liftOnDeg: 20,         // hip flexion above this starts a lift
+  liftOffDeg: 10,        // ... and below this ends it
+  topFraction: 0.7,      // "top of the lift" = at least 70% of that lift's peak
+});
+
+export const BALANCE = Object.freeze({
+  liftOn: 0.08,          // foot counts as lifted when it is 8% of leg length above the other
+  liftOff: 0.04,         // ... and as down again below 4%
+  onHoldS: 0.3,          // lift must last this long to start an attempt
+  offHoldS: 0.2,         // touchdown must last this long to end it
+  maxGapS: 0.5,          // tracking gaps longer than this end the attempt
+  minAttemptS: 1.0,
+  capS: 30,
 });
 
 export const CHAIR = Object.freeze({
@@ -30,7 +59,8 @@ export const CHAIR = Object.freeze({
   windowS: 30,
 });
 
-const IDX = { nose: 0, lShoulder: 11, rShoulder: 12, left: { hip: 23, knee: 25, ankle: 27 }, right: { hip: 24, knee: 26, ankle: 28 } };
+const IDX = { nose: 0, lShoulder: 11, rShoulder: 12,
+  left: { shoulder: 11, hip: 23, knee: 25, ankle: 27 }, right: { shoulder: 12, hip: 24, knee: 26, ankle: 28 } };
 const VIS_OK = 0.5;
 const deg = (r) => (r * 180) / Math.PI;
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
@@ -58,8 +88,13 @@ export function frameFeatures(lm, W, H) {
   const legs = {};
   for (const side of ["left", "right"]) {
     const h = px(lm, IDX[side].hip, W, H), k = px(lm, IDX[side].knee, W, H), a = px(lm, IDX[side].ankle, W, H);
+    let s = px(lm, IDX[side].shoulder, W, H);
+    if (s[2] < VIS_OK) s = sh;
     legs[side] = {
       flex: kneeFlexionDeg(h, k, a),
+      // Hip flexion: 0 = thigh in line with the trunk (lying flat / standing), grows as the leg lifts.
+      hipFlex: kneeFlexionDeg(s, h, k), // same 180-minus-included-angle formula, at the hip
+      hipVis: Math.min(s[2], h[2], k[2]),
       thighTilt: angleTo([k[0] - h[0], k[1] - h[1]], [0, 1]), // 0 = thigh pointing down, 90 = horizontal
       vis: Math.min(h[2], k[2], a[2]),
     };
@@ -85,7 +120,8 @@ export function pickLeg(feats, testId) {
   const stats = {};
   for (const side of ["left", "right"]) {
     const vis = feats.map((f) => f.legs[side].vis);
-    const okFlex = feats.filter((f) => f.legs[side].vis >= VIS_OK).map((f) => f.legs[side].flex);
+    const key = TESTS[testId]?.pickBy === "hip" ? "hipFlex" : "flex";
+    const okFlex = feats.filter((f) => f.legs[side].vis >= VIS_OK).map((f) => f.legs[side][key]);
     stats[side] = {
       visFrac: okFlex.length / Math.max(1, feats.length),
       meanVis: vis.reduce((a, b) => a + b, 0) / Math.max(1, vis.length),
@@ -159,13 +195,117 @@ export function countChairStands(series, { startT = null, ...opts } = {}) {
   // of a series would pull it back toward earlier, more bent samples).
   let halfwayCounted = false;
   const last = win[win.length - 1];
-  const rawEnd = s.filter((p) => p.t <= tEnd).at(-1);
+  // Knee angle at exactly 30 s, interpolated between the samples either side when available.
+  const before = s.filter((p) => p.t <= tEnd).at(-1), after = s.find((p) => p.t > tEnd);
+  const endFlex = before && after
+    ? before.flex + (after.flex - before.flex) * (tEnd - before.t) / (after.t - before.t)
+    : before?.flex;
   const coversWindow = last && last.t >= tEnd - 0.3;
-  if (coversWindow && phase === "sitting" && rawEnd.flex < (c.sitDeg + c.standDeg) / 2) halfwayCounted = true;
+  if (coversWindow && phase === "sitting" && endFlex < (c.sitDeg + c.standDeg) / 2) halfwayCounted = true;
   const reps = stands.length + (halfwayCounted ? 1 : 0);
   const notes = [];
   if (win.length && win[0].flex <= c.standDeg) notes.push("You were already standing at the start: begin seated.");
   if (!coversWindow) notes.push(`Recording covers only ${last ? (last.t - t0).toFixed(1) : 0} s of the 30 s.`);
   const note = notes.join(" ");
   return { reps, t0, tEnd, stands, halfwayCounted, coversWindow: !!coversWindow, note };
+}
+
+// Straight leg raise from a series [{t, hip, knee}] of trusted frames for one leg.
+// A lift starts when hip flexion passes liftOnDeg and ends below liftOffDeg. At the
+// top of each lift (>= 70% of its peak), knee flexion is the extensor (quad) lag.
+export function analyzeSLR(series, opts = {}) {
+  const c = { ...SLR, ...opts };
+  const s = series.filter((p) => Number.isFinite(p.hip) && Number.isFinite(p.knee)).sort((a, b) => a.t - b.t);
+  const lifts = [];
+  let cur = null, seenRest = false;   // a lift must start from the leg resting on the floor
+  for (const p of s) {
+    if (!cur && p.hip <= c.liftOffDeg) seenRest = true;
+    if (!cur && seenRest && p.hip >= c.liftOnDeg) cur = { pts: [p] };
+    else if (cur) {
+      cur.pts.push(p);
+      if (p.hip <= c.liftOffDeg) { lifts.push(cur); cur = null; }
+    }
+  }
+  const unfinished = !!cur;
+  if (cur) lifts.push(cur);
+  const reps = lifts.map(({ pts }) => {
+    const peak = Math.max(...pts.map((p) => p.hip));
+    const top = pts.filter((p) => p.hip >= Math.max(c.liftOnDeg, c.topFraction * peak));
+    const knees = top.map((p) => p.knee);
+    return {
+      t_start: pts[0].t, t_end: pts[pts.length - 1].t,
+      peak_lift_deg: peak,
+      lag_median_deg: median(knees), lag_max_deg: Math.max(...knees),
+      hold_s: top.length > 1 ? top[top.length - 1].t - top[0].t : 0,
+    };
+  });
+  const med = (k) => (reps.length ? median(reps.map((r) => r[k])) : NaN);
+  return {
+    reps, unfinished,
+    lag_median_deg: med("lag_median_deg"),
+    lag_worst_deg: reps.length ? Math.max(...reps.map((r) => r.lag_max_deg)) : NaN,
+    lift_median_deg: med("peak_lift_deg"),
+    hold_median_s: med("hold_s"),
+  };
+}
+
+// Single-leg stand from per-frame left and right leg points
+// ({t_s, hip:[x,y,v], knee, ankle}, pixels, y down). The lifted foot is the one whose
+// ankle is higher; the stance leg is the other one (auto unless `stance` is given).
+// Hold time runs from lift-off to touchdown, capped at capS.
+export function analyzeBalance(left, right, opts = {}) {
+  const c = { ...BALANCE, ...opts };
+  const n = Math.min(left.length, right.length);
+  const vis = (f) => Math.min(f.hip[2], f.ankle[2]) >= VIS_OK;
+  const legLens = [];
+  for (let i = 0; i < n; i++) {
+    for (const f of [left[i], right[i]]) if (vis(f)) legLens.push(Math.hypot(f.ankle[0] - f.hip[0], f.ankle[1] - f.hip[1]));
+  }
+  const L = median(legLens);
+  if (!Number.isFinite(L) || L <= 0) return { stance: null, attempts: [], best_s: NaN, note: "Hips and ankles not visible." };
+  // diff > 0: left ankle lower than right ankle (left foot down, right foot lifted).
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const ok = vis(left[i]) && vis(right[i]);
+    pts.push({ t: left[i].t_s, ok, diff: ok ? (left[i].ankle[1] - right[i].ankle[1]) / L : NaN });
+  }
+  let stance = opts.stance ?? null;
+  if (!stance) {
+    const lifted = pts.filter((p) => p.ok && Math.abs(p.diff) >= c.liftOn);
+    const leftDown = lifted.filter((p) => p.diff > 0).length;
+    stance = lifted.length === 0 ? null : (leftDown >= lifted.length - leftDown ? "left" : "right");
+  }
+  if (!stance) return { stance: null, attempts: [], best_s: NaN, note: "No lifted foot found: lift one foot clearly off the floor." };
+  const sign = stance === "left" ? 1 : -1;
+  const attempts = [];
+  let up = null, candUp = null, candDown = null, lastOkT = null, waitDown = false;
+  const close = (endT, how) => {
+    const dur = endT - up;
+    if (dur >= c.minAttemptS) {
+      const capped = dur >= c.capS;
+      attempts.push({ t_start: up, t_end: capped ? up + c.capS : endT, hold_s: capped ? c.capS : dur, ended: capped ? "30 s reached" : how });
+    }
+    up = null; candDown = null;
+  };
+  for (const p of pts) {
+    if (!p.ok) {
+      if (up != null && lastOkT != null && p.t - lastOkT > c.maxGapS) close(lastOkT, "lost tracking");
+      continue;
+    }
+    lastOkT = p.t;
+    const lift = sign * p.diff;
+    if (waitDown) { if (lift < c.liftOff) waitDown = false; continue; }   // after 30 s: wait for the foot to go down
+    if (up == null) {
+      if (lift >= c.liftOn) { candUp ??= p.t; if (p.t - candUp >= c.onHoldS) up = candUp; }
+      else candUp = null;
+    } else {
+      if (p.t - up >= c.capS) { close(up + c.capS, "30 s reached"); candUp = null; waitDown = true; continue; }
+      if (lift < c.liftOff) { candDown ??= p.t; if (p.t - candDown >= c.offHoldS) { close(candDown, "foot down"); candUp = null; } }
+      else candDown = null;
+    }
+  }
+  let ongoing = null;
+  if (up != null) { ongoing = { t_start: up, hold_s: Math.min(c.capS, (lastOkT ?? up) - up) }; close(lastOkT ?? up, "recording ended"); }
+  const best = attempts.length ? Math.max(...attempts.map((a) => a.hold_s)) : NaN;
+  return { stance, attempts, best_s: best, ongoing, legLengthPx: L, note: "" };
 }

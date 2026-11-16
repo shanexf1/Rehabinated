@@ -24,6 +24,8 @@
             <option value="seated_knee_rom">Seated knee test</option>
             <option value="lying_knee_rom">Lying knee test</option>
             <option value="chair_stand_30s">30-second chair stand</option>
+            <option value="straight_leg_raise">Straight leg raise</option>
+            <option value="single_leg_stand">Single-leg stand</option>
           </select></label>
         <label class="field narrow">Leg
           <select id="side"><option value="auto">Auto</option>
@@ -36,7 +38,7 @@
       <video id="video" playsinline muted></video>
       <canvas id="overlay"></canvas>
       <div class="readout" aria-live="polite">
-        <span class="label">Knee flexion</span>
+        <span class="label" id="angleLabel">Knee flexion</span>
         <span id="angle" class="angle">--</span>
         <span id="hint" class="hint">Start the camera, then film the leg from the side.</span>
         <span id="best" class="best"></span>
@@ -78,6 +80,8 @@
             <option value="lying_knee_rom">Lying knee test</option>
             <option value="seated_knee_rom">Seated knee test</option>
             <option value="chair_stand_30s">30-second chair stand</option>
+            <option value="straight_leg_raise">Straight leg raise</option>
+            <option value="single_leg_stand">Single-leg stand</option>
           </select></label>
         <span id="resHow" class="how"></span>
       </div>
@@ -111,7 +115,7 @@
         <label>Last session pain (0–10)<input id="pPain" type="number" min="0" max="10" step="1"></label>
       </div>
       <label class="check"><input id="sagittal" type="checkbox" checked>
-        Filmed from the side (sagittal view)</label>
+        <span id="viewLabel">Filmed from the side (sagittal view)</span></label>
       <p class="note">Targets come from the clinician. Leave them blank if none are set;
         the agent will then ask for them instead of deciding.</p>
       <div class="controls">
