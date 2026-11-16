@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#121211">
+  <title>Rehabinated · Knee tracker</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="bar">
+    <div>
+      <h1>Knee tracker</h1>
+      <p class="sub">Rehabinated · seated knee extension</p>
+    </div>
+    <span id="modelStatus" class="chip">Loading pose model…</span>
+  </header>
+
+  <main>
+    <section class="stage" id="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <div class="readout" aria-live="polite">
+        <span class="label">Knee flexion</span>
+        <span id="angle" class="angle">--</span>
+        <span id="hint" class="hint">Start the camera, then film the leg from the side.</span>
+      </div>
+      <div id="recBadge" class="rec" hidden>● REC <span id="recCount">0</span></div>
+      <div id="progress" class="progress" hidden><div id="progressBar"></div></div>
+    </section>
+
+    <section class="controls">
+      <button id="btnCamera" class="primary">Start camera</button>
+      <button id="btnRecord" disabled>Record</button>
+      <label class="button" for="fileInput">Analyze a video</label>
+      <input id="fileInput" type="file" accept="video/*" hidden>
+    </section>
+
+    <details class="settings">
+      <summary>Settings</summary>
+      <div class="grid">
+        <label>Leg
+          <select id="side"><option value="auto">Auto (side facing camera)</option>
+            <option value="right">Right</option><option value="left">Left</option></select></label>
+        <label>Camera
+          <select id="facing"><option value="environment">Back</option>
+            <option value="user">Front (selfie)</option></select></label>
+        <label>Model
+          <select id="model"><option value="lite">Lite (faster)</option>
+            <option value="full">Full (more accurate)</option></select></label>
+        <label>Samples per second
+          <input id="rate" type="number" min="2" max="30" step="1" value="10"></label>
+      </div>
+      <p class="note">Setup: phone at knee height, 2–3 m away, side-on to the leg, whole leg
+        from hip to ankle in frame, good light. Video never leaves your phone; only the
+        landmark numbers you export are shared.</p>
+    </details>
+
+    <section id="results" class="card" hidden>
+      <h2>Session preview</h2>
+      <p class="note">Preview only. The agent skill makes the on-track / below-target /
+        clinician-review decision from the exported file.</p>
+      <div class="stats">
+        <div><span class="k">Extension lag</span><span id="sLag" class="v">--</span></div>
+        <div><span class="k">Peak flexion</span><span id="sPeak" class="v">--</span></div>
+        <div><span class="k">ROM</span><span id="sRom" class="v">--</span></div>
+        <div><span class="k">Frames used</span><span id="sFrames" class="v">--</span></div>
+      </div>
+      <p id="quality" class="quality"></p>
+
+      <figure class="viz-root">
+        <figcaption>Knee flexion over the session (°)</figcaption>
+        <div class="legend"><span class="dot"></span>Frame used
+          <span class="ring"></span>Frame rejected</div>
+        <div class="chartwrap"><svg id="chart" role="img" aria-label="Knee flexion over time"></svg>
+          <div id="tip" class="tip" hidden></div></div>
+        <details><summary>Frame table</summary><div id="table"></div></details>
+      </figure>
+
+      <h3>Details for the agent</h3>
+      <div class="grid">
+        <label>Patient ID (no names)<input id="pid" value="P-anon-01" autocomplete="off"></label>
+        <label>Pain now (0–10)<input id="pain" type="number" min="0" max="10" step="1"></label>
+        <label>Target max extension lag (°)<input id="tLag" type="number" min="0" max="30" step="1"></label>
+        <label>Target min ROM (°)<input id="tRom" type="number" min="10" max="150" step="1"></label>
+        <label>Last session extension lag (°)<input id="pLag" type="number" min="0" max="90" step="0.1"></label>
+        <label>Last session ROM (°)<input id="pRom" type="number" min="0" max="160" step="0.1"></label>
+        <label>Last session pain (0–10)<input id="pPain" type="number" min="0" max="10" step="1"></label>
+      </div>
+      <label class="check"><input id="sagittal" type="checkbox" checked>
+        Filmed from the side (sagittal view)</label>
+      <p class="note">Targets come from the clinician. Leave them blank if none are set;
+        the agent will then ask for them instead of deciding.</p>
+      <div class="controls">
+        <button id="btnShare" class="primary">Share JSON</button>
+        <button id="btnDownload">Download JSON</button>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
